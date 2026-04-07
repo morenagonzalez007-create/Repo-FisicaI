@@ -45,3 +45,5 @@ while True:
         except Exception as e:
             print(f"Error al conectar con Gemini: {e}")
 #probando push..!!
+
+print("prueba intento subir commit")
