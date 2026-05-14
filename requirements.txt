@@ -1,0 +1,5 @@
+customtkinter
+google-generativeai
+python-dotenv
+matplotlib
+Pillow
