@@ -84,18 +84,352 @@ class FormulaRenderer:
         return photo
 
 
+def _limpiar_para_texto(texto):
+    """Convierte la respuesta en texto limpio para el panel de la app.
+
+    - Quita bloques ```python...``` (los graficos se ejecutan aparte)
+    - Convierte formulas LaTeX a texto legible con Unicode
+    - Limpia markdown basico
+    """
+    # Quitar bloques de codigo python (se ejecutan con los botones)
+    texto = re.sub(r'```[Pp]ython\s*\n.*?```', '\n[Codigo de grafico - usa los botones para ejecutarlo]\n', texto, flags=re.DOTALL)
+
+    # Quitar otros bloques de codigo
+    texto = re.sub(r'```\w*\n.*?```', '', texto, flags=re.DOTALL)
+
+    # Convertir formulas LaTeX a texto legible
+    def latex_a_texto(match):
+        latex = (match.group(1) or match.group(2) or "").strip()
+        # Reemplazos LaTeX -> Unicode
+        reemplazos = [
+            (r'\\vec\{([^}]+)\}', r'\1⃗'),
+            (r'\\hat\{([^}]+)\}', r'\1̂'),
+            (r'\\frac\{([^}]+)\}\{([^}]+)\}', r'(\1)/(\2)'),
+            (r'\\cdot', '·'),
+            (r'\\times', '×'),
+            (r'\\sqrt\{([^}]+)\}', r'√(\1)'),
+            (r'\\theta', 'θ'),
+            (r'\\omega', 'ω'),
+            (r'\\alpha', 'α'),
+            (r'\\beta', 'β'),
+            (r'\\mu', 'μ'),
+            (r'\\tau', 'τ'),
+            (r'\\phi', 'φ'),
+            (r'\\Delta', 'Δ'),
+            (r'\\Sigma', 'Σ'),
+            (r'\\pi', 'π'),
+            (r'\\infty', '∞'),
+            (r'\\int', '∫'),
+            (r'\\sum', 'Σ'),
+            (r'\\pm', '±'),
+            (r'\\neq', '≠'),
+            (r'\\leq', '≤'),
+            (r'\\geq', '≥'),
+            (r'\\approx', '≈'),
+            (r'\\rightarrow', '→'),
+            (r'\\leftarrow', '←'),
+            (r'\\text\{([^}]+)\}', r'\1'),
+            (r'\\,', ' '),
+            (r'\\;', ' '),
+            (r'\\quad', '  '),
+            (r'\\qquad', '    '),
+            (r'\\left', ''),
+            (r'\\right', ''),
+            (r'\\dot\{([^}]+)\}', r'\1̇'),
+            (r'\\ddot\{([^}]+)\}', r'\1̈'),
+            (r'\^2', '²'),
+            (r'\^3', '³'),
+            (r'\^{2}', '²'),
+            (r'\^{3}', '³'),
+            (r'_\{([^}]+)\}', r'_\1'),
+            (r'_0', '₀'),
+            (r'_1', '₁'),
+            (r'_2', '₂'),
+            (r'_3', '₃'),
+            (r'\\\\', '\n'),
+        ]
+        resultado = latex
+        for patron, reemplazo in reemplazos:
+            resultado = re.sub(patron, reemplazo, resultado)
+        # Limpiar backslashes restantes de comandos LaTeX no reconocidos
+        resultado = re.sub(r'\\([a-zA-Z]+)', r'\1', resultado)
+        # Limpiar llaves restantes
+        resultado = resultado.replace('{', '').replace('}', '')
+        return f'  {resultado}  ' if match.group(1) is not None else resultado
+
+    # Normalizar delimitadores
+    texto = normalizar_formulas(texto)
+    # Procesar formulas: $$...$$ (display) y $...$ (inline)
+    texto = FORMULA_BLOCK.sub(latex_a_texto, texto)
+
+    # Limpiar lineas vacias multiples
+    texto = re.sub(r'\n{4,}', '\n\n\n', texto)
+
+    return texto
+
+
+def _arreglar_latex_en_codigo(codigo):
+    """Convierte LaTeX en labels de matplotlib a Unicode para evitar errores de parseo.
+
+    Gemini genera labels con LaTeX como '$\\vec{v}$' o 'v_\\theta' que causan
+    ParseSyntaxException en matplotlib. La solucion mas robusta es convertir
+    los comandos LaTeX a caracteres Unicode directamente.
+
+    - Raw strings con $ (r'$\\theta$') se dejan intactas (matplotlib las parsea bien)
+    - Strings normales con LaTeX se convierten a Unicode
+    """
+    # Tabla de reemplazos LaTeX -> Unicode para labels
+    reemplazos_latex = [
+        # Letras griegas (con 1 o 2 backslashes)
+        (r'\\\\theta', 'θ'), (r'\\theta', 'θ'),
+        (r'\\\\omega', 'ω'), (r'\\omega', 'ω'),
+        (r'\\\\alpha', 'α'), (r'\\alpha', 'α'),
+        (r'\\\\beta', 'β'), (r'\\beta', 'β'),
+        (r'\\\\mu', 'μ'), (r'\\mu', 'μ'),
+        (r'\\\\tau', 'τ'), (r'\\tau', 'τ'),
+        (r'\\\\phi', 'φ'), (r'\\phi', 'φ'),
+        (r'\\\\rho', 'ρ'), (r'\\rho', 'ρ'),
+        (r'\\\\pi', 'π'), (r'\\pi', 'π'),
+        (r'\\\\Delta', 'Δ'), (r'\\Delta', 'Δ'),
+        # Vectores y acentos
+        (r'\\\\vec\{([^}]+)\}', r'\1⃗'), (r'\\vec\{([^}]+)\}', r'\1⃗'),
+        (r'\\\\hat\{([^}]+)\}', r'\1̂'), (r'\\hat\{([^}]+)\}', r'\1̂'),
+        (r'\\\\dot\{([^}]+)\}', r'\1̇'), (r'\\dot\{([^}]+)\}', r'\1̇'),
+        (r'\\\\ddot\{([^}]+)\}', r'\1̈'), (r'\\ddot\{([^}]+)\}', r'\1̈'),
+        # Operadores
+        (r'\\\\cdot', '·'), (r'\\cdot', '·'),
+        (r'\\\\times', '×'), (r'\\times', '×'),
+    ]
+
+    lineas = codigo.split('\n')
+    resultado = []
+    for linea in lineas:
+        # NO tocar raw strings (r'...' o r"...") - matplotlib las maneja bien
+        if re.search(r"""\br(['"])""", linea):
+            resultado.append(linea)
+            continue
+
+        # NO tocar lineas de import, comentarios, o lineas sin strings
+        if linea.strip().startswith(('#', 'import', 'from')) or ('"' not in linea and "'" not in linea):
+            resultado.append(linea)
+            continue
+
+        # Aplicar reemplazos de LaTeX -> Unicode en strings normales
+        for patron, reemplazo in reemplazos_latex:
+            linea = re.sub(patron, reemplazo, linea)
+
+        # Limpiar $ delimitadores sobrantes en labels normales (no raw)
+        # Si quedo algo como "$θ$" en un string normal, sacar los $
+        linea = re.sub(r'\$([^$\\]{1,30})\$', r'\1', linea)
+
+        resultado.append(linea)
+    return '\n'.join(resultado)
+
+
+def _sanitizar_codigo_matplotlib(codigo):
+    """Arregla errores comunes en codigo matplotlib generado por Gemini.
+
+    Gemini a veces usa argumentos invalidos como head_width, head_length, width
+    dentro de arrowprops de FancyArrowPatch, lo cual causa AttributeError.
+    Esta funcion los remueve automaticamente.
+    """
+    # Remover argumentos invalidos de arrowprops que causan FancyArrowPatch errors
+    # head_width, head_length, width no son validos cuando se usa arrowstyle
+    args_invalidos = ['head_width', 'head_length', 'width']
+    for arg in args_invalidos:
+        # Patron: arg=valor (numerico o variable) seguido de coma o cierre de parentesis
+        codigo = re.sub(
+            rf",?\s*{arg}\s*=\s*[^,\)]+",
+            '',
+            codigo,
+        )
+    # Limpiar comas dobles o coma antes de cierre que queden
+    codigo = re.sub(r',\s*,', ',', codigo)
+    codigo = re.sub(r',\s*\)', ')', codigo)
+    codigo = re.sub(r'\(\s*,', '(', codigo)
+
+    # Si Gemini uso plt.quiver, intentar convertir a plt.annotate
+    # (quiver da problemas de escala frecuentemente)
+    # No hacemos conversion automatica porque es complejo, pero si advertimos
+    if 'plt.quiver' in codigo or '.quiver(' in codigo:
+        print("[WARN] El codigo usa plt.quiver que puede dar problemas de escala.")
+
+    return codigo
+
+
+def _separar_analisis(texto):
+    """Separa la respuesta principal de la seccion de analisis."""
+    marcador = "---ANALISIS---"
+    fin = "---FIN_ANALISIS---"
+    if marcador in texto:
+        idx_start = texto.index(marcador)
+        idx_end = texto.index(fin) + len(fin) if fin in texto else len(texto)
+        respuesta = texto[:idx_start].rstrip()
+        analisis_raw = texto[idx_start + len(marcador):idx_end - len(fin) if fin in texto else idx_end].strip()
+        return respuesta, analisis_raw
+    return texto, ""
+
+
+def _formatear_analisis_html(analisis_raw):
+    """Convierte la seccion de analisis en HTML con estilo."""
+    if not analisis_raw:
+        return ""
+
+    html_parts = ['<div class="analisis-box">']
+    html_parts.append('<h2 class="analisis-titulo">Analisis Didactico</h2>')
+
+    en_glosario = False
+
+    for line in analisis_raw.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("TEMA:"):
+            tema = line[5:].strip()
+            html_parts.append(f'<div class="tema-badge">{tema}</div>')
+        elif line.startswith("JUSTIFICACION_TEMA:"):
+            just = line[19:].strip()
+            html_parts.append(f'<p class="justificacion">{just}</p>')
+        elif line.startswith("GLOSARIO:"):
+            html_parts.append('<h3>Glosario de Formulas</h3>')
+            html_parts.append('<div class="glosario">')
+            en_glosario = True
+        elif en_glosario and (line.startswith("- $$") or line.startswith("- $")):
+            # Linea de glosario: - $$formula$$: explicacion
+            contenido = line[2:].strip()
+            # Buscar posicion del cierre $$ para separar formula de explicacion
+            cierre = contenido.find('$$', 2)  # buscar segundo $$
+            if cierre != -1:
+                pos_dos_puntos = contenido.find(':', cierre + 2)
+                if pos_dos_puntos != -1:
+                    formula_part = contenido[:pos_dos_puntos].strip()
+                    explicacion = contenido[pos_dos_puntos + 1:].strip()
+                else:
+                    formula_part = contenido
+                    explicacion = ""
+            elif ':' in contenido:
+                # Para formulas inline $...$
+                # Buscar cierre del $ inline
+                cierre_inline = contenido.find('$', 1)
+                if cierre_inline != -1:
+                    pos_dos_puntos = contenido.find(':', cierre_inline + 1)
+                    if pos_dos_puntos != -1:
+                        formula_part = contenido[:pos_dos_puntos].strip()
+                        explicacion = contenido[pos_dos_puntos + 1:].strip()
+                    else:
+                        formula_part = contenido
+                        explicacion = ""
+                else:
+                    formula_part, explicacion = contenido.split(':', 1)
+                    explicacion = explicacion.strip()
+            else:
+                formula_part = contenido
+                explicacion = ""
+
+            html_parts.append(
+                f'<div class="glosario-item">'
+                f'<span class="glosario-formula">{formula_part}</span>'
+            )
+            if explicacion:
+                html_parts.append(f'<span class="glosario-desc">{explicacion}</span>')
+            html_parts.append('</div>')
+        elif en_glosario and line.startswith("- "):
+            html_parts.append(f'<p class="glosario-item-text">{line[2:]}</p>')
+        else:
+            html_parts.append(f'<p>{line}</p>')
+
+    if en_glosario:
+        html_parts.append('</div>')  # cerrar div.glosario
+    html_parts.append('</div>')  # cerrar div.analisis-box
+    return '\n'.join(html_parts)
+
+
+def _markdown_a_html(texto):
+    """Convierte markdown basico a HTML limpio, sin bloques de codigo."""
+
+    # 1. Quitar bloques de codigo Python (los graficos se ejecutan en la app)
+    def reemplazo_codigo(match):
+        codigo = match.group(1) or match.group(2) or ""
+        primera = codigo.strip().split('\n')[0] if codigo.strip() else ""
+        if "GRAFICO_TIEMPO" in primera:
+            nota = "Grafico de magnitudes vs tiempo"
+        elif "GRAFICO_VECTORES" in primera:
+            nota = "Diagrama de vectores y versores"
+        elif "GRAFICO_DCL" in primera:
+            nota = "Diagrama de cuerpo libre"
+        else:
+            nota = "Grafico"
+        return f'\n<div class="codigo-nota">📊 {nota} — ejecutar desde la app con los botones de graficos.</div>\n'
+
+    texto = re.sub(r'```[Pp]ython\s*\n(.*?)```', reemplazo_codigo, texto, flags=re.DOTALL)
+    texto = re.sub(r'```\w*\s*\n(.*?)```', reemplazo_codigo, texto, flags=re.DOTALL)
+
+    # 2. Escapar HTML (pero preservar $$ para MathJax)
+    # Guardar formulas temporalmente
+    formulas = []
+    def guardar_formula(match):
+        formulas.append(match.group(0))
+        return f'\x00FORMULA{len(formulas)-1}\x00'
+    texto = re.sub(r'\$\$.*?\$\$', guardar_formula, texto, flags=re.DOTALL)
+    texto = re.sub(r'\$[^\$\n]+?\$', guardar_formula, texto)
+
+    # Escapar HTML
+    texto = texto.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+    # Restaurar formulas
+    for i, formula in enumerate(formulas):
+        texto = texto.replace(f'\x00FORMULA{i}\x00', formula)
+
+    # 3. Markdown -> HTML
+    # Encabezados
+    texto = re.sub(r'^#### (.+)$', r'<h4>\1</h4>', texto, flags=re.MULTILINE)
+    texto = re.sub(r'^### (.+)$', r'<h3>\1</h3>', texto, flags=re.MULTILINE)
+    texto = re.sub(r'^## (.+)$', r'<h2>\1</h2>', texto, flags=re.MULTILINE)
+    texto = re.sub(r'^# (.+)$', r'<h1>\1</h1>', texto, flags=re.MULTILINE)
+
+    # Negritas
+    texto = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', texto)
+    # Italicas
+    texto = re.sub(r'\*([^\*]+?)\*', r'<em>\1</em>', texto)
+
+    # Lineas horizontales
+    texto = re.sub(r'^---+\s*$', '<hr>', texto, flags=re.MULTILINE)
+
+    # Listas con viñetas
+    texto = re.sub(r'^\s*[\*\-]\s+(.+)$', r'<li>\1</li>', texto, flags=re.MULTILINE)
+    # Agrupar <li> consecutivos en <ul>
+    texto = re.sub(r'((?:<li>.*?</li>\s*)+)', r'<ul>\1</ul>', texto, flags=re.DOTALL)
+
+    # Listas numeradas
+    texto = re.sub(r'^\s*(\d+)\.\s+(.+)$', r'<li>\2</li>', texto, flags=re.MULTILINE)
+
+    # 4. Parrafos: convertir doble salto de linea a cierre/apertura de parrafo
+    #    y saltos simples a <br> solo donde tiene sentido
+    texto = re.sub(r'\n{2,}', '</p>\n<p>', texto)
+    texto = re.sub(r'(?<!</p>)\n(?!<)', '<br>\n', texto)
+
+    # Envolver en <p> si no empieza con tag
+    if not texto.strip().startswith('<'):
+        texto = '<p>' + texto + '</p>'
+
+    # Limpiar parrafos vacios y <br> sueltos despues de tags de bloque
+    texto = re.sub(r'<p>\s*</p>', '', texto)
+    texto = re.sub(r'(<(?:h[1-4]|hr|ul|li|div)[^>]*>)\s*<br>', r'\1', texto)
+    texto = re.sub(r'<br>\s*(<(?:/li|/ul|h[1-4]|hr|div))', r'\1', texto)
+
+    return texto
+
+
 def abrir_en_navegador(response_text):
-    # Convertir \[...\] a $$...$$ para que MathJax los detecte
-    safe = re.sub(r'\\\[(.+?)\\\]', r'$$\1$$', response_text, flags=re.DOTALL)
-    safe = safe.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-    safe = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', safe)
-    safe = re.sub(r'^#### (.+)$', r'<h4>\1</h4>', safe, flags=re.MULTILINE)
-    safe = re.sub(r'^### (.+)$', r'<h3>\1</h3>', safe, flags=re.MULTILINE)
-    safe = re.sub(r'^## (.+)$', r'<h2>\1</h2>', safe, flags=re.MULTILINE)
-    safe = re.sub(r'^# (.+)$', r'<h1>\1</h1>', safe, flags=re.MULTILINE)
-    safe = re.sub(r'```python\n(.*?)```', r'<pre><code>\1</code></pre>', safe, flags=re.DOTALL)
-    safe = re.sub(r'`([^`]+)`', r'<code>\1</code>', safe)
-    safe = safe.replace('\n', '<br>\n')
+    # Normalizar todas las formulas a $$...$$ para MathJax
+    normalizado = normalizar_formulas(response_text)
+
+    # Separar respuesta y analisis
+    respuesta, analisis_raw = _separar_analisis(normalizado)
+    analisis_html = _formatear_analisis_html(analisis_raw)
+
+    # Convertir markdown a HTML limpio
+    contenido_html = _markdown_a_html(respuesta)
 
     html = f"""<!DOCTYPE html>
 <html><head>
@@ -108,17 +442,56 @@ MathJax = {{
 </script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 <style>
-body {{ font-family: 'Segoe UI', Tahoma, sans-serif; max-width: 850px; margin: 40px auto;
+body {{ font-family: 'Segoe UI', Tahoma, sans-serif; max-width: 900px; margin: 40px auto;
        padding: 24px; background: #1a1a2e; color: #e0e0e0; line-height: 1.8; font-size: 16px; }}
 h1,h2,h3,h4 {{ color: #4ea8de; margin-top: 1.2em; }}
 strong {{ color: #7ec8e3; }}
-code {{ background: #16213e; padding: 2px 8px; border-radius: 4px; font-size: 0.95em; }}
-pre {{ background: #16213e; padding: 16px; border-radius: 8px; overflow-x: auto; }}
-pre br {{ display: none; }}
+em {{ color: #c4c4c4; }}
+hr {{ border: none; border-top: 1px solid #2d4a6f; margin: 28px 0; }}
+ul {{ padding-left: 24px; }}
+li {{ margin: 6px 0; }}
 .MathJax {{ font-size: 115% !important; }}
+
+/* Nota de grafico (reemplazo del bloque de codigo) */
+.codigo-nota {{
+    background: #16213e; border-left: 4px solid #4ea8de; padding: 12px 18px;
+    border-radius: 0 8px 8px 0; margin: 16px 0; color: #7ec8e3;
+    font-size: 14px; font-style: italic;
+}}
+
+/* Estilos para la seccion de analisis */
+.analisis-box {{
+    margin-top: 40px; padding: 24px; border-radius: 12px;
+    background: linear-gradient(135deg, #16213e 0%, #1a1a3e 100%);
+    border: 1px solid #2d6a4f;
+}}
+.analisis-titulo {{
+    color: #40916c; margin-top: 0; font-size: 22px;
+    border-bottom: 2px solid #2d6a4f; padding-bottom: 10px;
+}}
+.tema-badge {{
+    display: inline-block; background: #2d6a4f; color: #fff; padding: 6px 18px;
+    border-radius: 20px; font-weight: bold; font-size: 15px; margin: 10px 0;
+}}
+.justificacion {{
+    color: #a8d5ba; font-style: italic; margin: 8px 0 20px 0;
+    padding-left: 12px; border-left: 3px solid #2d6a4f;
+}}
+.glosario {{ margin-top: 10px; }}
+.glosario-item {{
+    display: flex; flex-direction: column; background: #0d1b2a; border-radius: 8px;
+    padding: 12px 16px; margin: 8px 0; border-left: 4px solid #4ea8de;
+}}
+.glosario-formula {{ color: #4ea8de; font-size: 17px; margin-bottom: 4px; }}
+.glosario-desc {{ color: #b0c4de; font-size: 14px; }}
+.glosario-item-text {{ color: #b0c4de; margin: 4px 0; }}
 </style>
 </head><body>
-{safe}
+<h1>Respuesta del Asistente de Fisica I</h1>
+<div class="respuesta">
+{contenido_html}
+</div>
+{analisis_html}
 </body></html>"""
 
     with tempfile.NamedTemporaryFile('w', suffix='.html', delete=False, encoding='utf-8') as f:
@@ -168,6 +541,15 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
    - El codigo debe estar rodeado de ```python y ```.
    - DEBE finalizar con plt.show() para lanzarse en la PC del estudiante.
    - NO mandes dibujos ASCII, solo el codigo python directo.
+   - IMPORTANTE PARA LABELS Y TITULOS DEL GRAFICO: Dentro del codigo Python, en los titulos,
+     labels de ejes y leyendas, usa UNICAMENTE caracteres Unicode directos (θ, ω, α, Δ, ², etc.)
+     o raw strings con un solo backslash (r'$\theta$').
+     NUNCA uses doble backslash (\\\\theta) ni LaTeX con $$ dentro del codigo Python.
+     Ejemplo correcto: plt.ylabel("Posicion (m)")
+     Ejemplo correcto: plt.ylabel("Velocidad Angular ω (rad/s)")
+     Ejemplo correcto: plt.ylabel(r'$\theta$ (rad)')
+     Ejemplo INCORRECTO: plt.ylabel("$\\\\theta$ (rad)")
+     Ejemplo INCORRECTO: plt.ylabel("$$\\\\vec{v}$$")
 5. FORMATO DE FORMULAS MATEMATICAS (MUY IMPORTANTE - CUMPLIR SIEMPRE):
    REGLA GENERAL: Toda expresion matematica, variable, vector, letra griega o formula debe mostrarse
    con simbolos matematicos Unicode o LaTeX. NUNCA con texto plano tipo codigo.
@@ -186,11 +568,30 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
      Escribi $$ antes y $$ despues de cada formula. Ejemplo: $$F = ma$$
      PROHIBIDO usar cualquier otro delimitador: NO \\[ \\], NO \\( \\), NO [ ], NO ( ).
      Si escribis una formula sin $$ el sistema NO la puede mostrar. Siempre usa $$.
+
+   FORMULAS DE REFERENCIA DE LA CATEDRA (usar EXACTAMENTE estas):
+
+   CINEMATICA 2D - Coordenadas Cartesianas (C.C.):
+     Posicion:   $$\\vec{r} = x(t) \\, \\hat{x} + y(t) \\, \\hat{y}$$
+     Velocidad:  $$\\vec{v} = \\dot{x} \\, \\hat{x} + \\dot{y} \\, \\hat{y} = v_x \\, \\hat{x} + v_y \\, \\hat{y}$$
+     Aceleracion: $$\\vec{a} = \\ddot{x} \\, \\hat{x} + \\ddot{y} \\, \\hat{y} = a_x \\, \\hat{x} + a_y \\, \\hat{y}$$
+
+   CINEMATICA 2D - Coordenadas Polares (C.P.):
+     Posicion:   $$\\vec{r} = r \\, \\hat{r}$$ donde $$r = |\\vec{r}|$$ y θ es el angulo
+     Velocidad:  $$\\vec{v} = \\dot{r} \\, \\hat{r} + r \\dot{\\theta} \\, \\hat{\\theta}$$
+                 Es decir: $$v_r = \\dot{r}$$ y $$v_\\theta = r \\, \\dot{\\theta}$$
+     Aceleracion: $$a_r = \\ddot{r} - r \\, \\dot{\\theta}^2$$ (componente centripeta: $$-r\\dot{\\theta}^2$$)
+                  $$a_\\theta = r \\, \\ddot{\\theta} + 2 \\, \\dot{r} \\, \\dot{\\theta}$$
+
+   CINEMATICA 2D - Coordenadas Intrinsecas (C.I.):
+     Posicion:   $$s = s(t)$$ (longitud de arco sobre la trayectoria)
+     Velocidad:  $$\\vec{v} = \\dot{s} \\, \\hat{t} = v \\, \\hat{t}$$ (la v⃗ SIEMPRE es tangente a la trayectoria)
+     Aceleracion: $$a_t = \\ddot{s}$$ (componente tangencial = traslacion)
+                  $$a_n = \\frac{\\dot{s}^2}{\\rho} = \\frac{v^2}{\\rho}$$ (componente normal = rotacion, ρ = radio de curvatura)
+
+   Otras formulas fundamentales:
      $$\\vec{F}_{neta} = m \\cdot \\vec{a}$$
      $$E_c = \\frac{1}{2} m v^2$$
-     $$\\vec{v}_{F1/D} = v_r \\, \\hat{u}_r + v_\\theta \\, \\hat{u}_\\theta$$
-     $$a_r = \\dot{v}_r - R \\, \\omega^2$$
-     $$a_\\theta = 2 \\, v_r \\, \\omega + R \\, \\alpha$$
      $$\\vec{p} = m \\cdot \\vec{v}$$
      $$W = \\int \\vec{F} \\cdot d\\vec{r}$$
      $$x(t) = x_0 + v_0 t + \\frac{1}{2} a t^2$$
@@ -208,6 +609,111 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
    D) Siempre nombra la ley o formula antes de escribirla.
      Ejemplo correcto: "Aplicamos la componente radial de la aceleracion en coordenadas polares:
      $$a_r = \\dot{v}_r - R \\, \\omega^2$$"
+
+6. DIAGRAMAS Y GRAFICOS OBLIGATORIOS:
+   En TODOS los ejercicios genera bloques de codigo Python con matplotlib.
+   REGLA CRITICA DE MARCADORES: Cada bloque DEBE empezar con un comentario marcador en la
+   PRIMERA linea, ANTES de cualquier import. Los marcadores posibles son:
+     # GRAFICO_TIEMPO   -> para graficos de posicion, velocidad o aceleracion vs tiempo
+     # GRAFICO_VECTORES -> para diagramas de vectores, versores y coordenadas
+     # GRAFICO_DCL      -> para diagramas de cuerpo libre
+
+   A) DIAGRAMA DE CUERPO LIBRE (DCL/DCA): Si hay fuerzas involucradas, dibuja el diagrama
+      mostrando TODAS las fuerzas con flechas (plt.annotate con arrowprops), el cuerpo como
+      un punto o rectangulo, ejes coordenados, y etiquetas con el nombre de cada fuerza.
+      Usa colores distintos: rojo para peso, azul para normal, verde para fuerzas aplicadas,
+      naranja para friccion, etc.
+      Primera linea del bloque: # GRAFICO_DCL
+
+   B) VECTORES Y VERSORES - TODO EN UN SOLO GRAFICO:
+      En ejercicios de cinematica, genera UN UNICO bloque de codigo Python que dibuje
+      UNA SOLA figura con plt.subplots(1, 3, figsize=(20, 7)) conteniendo 3 subplots:
+        - Subplot 1: Coordenadas Cartesianas (C.C.) con versores x̂, ŷ
+        - Subplot 2: Coordenadas Polares (C.P.) con versores r̂, θ̂
+        - Subplot 3: Coordenadas Intrinsecas (C.I.) con versores t̂, n̂
+
+      QUE DIBUJAR EN CADA SUBPLOT (SOLO ESTO, NADA MAS):
+        1. Trayectoria: linea GRIS punteada ('--', color='gray', alpha=0.5)
+        2. Punto de la particula: punto NEGRO grande (marker='o', color='black', ms=10, zorder=5)
+        3. Vector posicion r⃗: flecha VIOLETA (color='purple', lw=2) desde el origen al punto
+        4. Vector velocidad v⃗: flecha ROJA gruesa (color='red', lw=3) desde el punto
+        5. Vector aceleracion a⃗: flecha AZUL gruesa (color='blue', lw=3) desde el punto
+        6. Versores del sistema: flechas NEGRAS delgadas (color='black', lw=1.5) desde el punto
+           - C.C.: x̂ e ŷ (se dibujan en el ORIGEN, no en la particula)
+           - C.P.: r̂ y θ̂ (se dibujan en la PARTICULA)
+           - C.I.: t̂ y n̂ (se dibujan en la PARTICULA)
+
+      NO DIBUJAR componentes (vx, vy, vr, v_theta, at, an, etc.). Solo v⃗ y a⃗ totales.
+
+      LEYENDA OBLIGATORIA:
+      Agregar un cuadro de leyenda (ax.legend) en CADA subplot con:
+        - "v⃗  Velocidad" en color rojo
+        - "a⃗  Aceleracion" en color azul
+        - "r⃗  Posicion" en color violeta
+        - "Versores" en color negro
+      Usar: ax.plot([], [], color='red', lw=3, label='v⃗  Velocidad'), etc. y ax.legend(loc='lower left')
+
+      ESCALA DE FLECHAS - MUY IMPORTANTE:
+      Los vectores v⃗ y a⃗ suelen ser muy chicos comparados con la posicion.
+      SIEMPRE escala las flechas para que midan entre 4 y 6 unidades en el grafico:
+        escala_v = 5.0 / abs(v_magnitud)
+        escala_a = 5.0 / abs(a_magnitud)
+      Los versores deben medir 3 unidades (escala fija = 3).
+      Agrega una nota: ax.text(..., "Vectores escalados", fontsize=9, color='gray')
+
+      REGLA CRITICA DE CODIGO - COMO DIBUJAR FLECHAS:
+      SOLO usa plt.annotate con arrowprops. NUNCA uses plt.quiver.
+      NUNCA uses head_width, head_length, width en arrowprops.
+      Formato UNICO valido:
+        ax.annotate('', xy=(x_fin, y_fin), xytext=(x_ini, y_ini),
+                    arrowprops=dict(arrowstyle='->', color='red', lw=3))
+        ax.text(x_label, y_label, "v⃗", fontsize=14, color='red', fontweight='bold')
+      Las etiquetas van con ax.text() SEPARADO, desplazadas 1-2 unidades de la punta.
+      Calcula TODOS los valores numericamente con numpy ANTES de dibujar.
+
+      TITULOS de cada subplot:
+        "Coord. Cartesianas (C.C.)" / "Coord. Polares (C.P.)" / "Coord. Intrinsecas (C.I.)"
+
+      plt.tight_layout() antes de plt.show().
+      Primera linea del bloque: # GRAFICO_VECTORES
+      NO generes 3 bloques separados. TODO en UN SOLO bloque con subplots.
+
+   C) GRAFICOS DE CINEMATICA vs TIEMPO: Para graficos de x(t), v(t), a(t), genera
+      un bloque separado con subplots para cada magnitud vs tiempo.
+      Primera linea del bloque: # GRAFICO_TIEMPO
+
+   IMPORTANTE: Cada diagrama debe ser un bloque ```python separado con plt.show() al final.
+   NO hagas dibujos ASCII. SIEMPRE codigo Python ejecutable.
+   NUNCA olvides el comentario marcador en la primera linea de cada bloque.
+
+7. SECCION DE ANALISIS (OBLIGATORIO AL FINAL DE CADA RESPUESTA):
+   Al final de CADA respuesta, SIEMPRE incluye una seccion de analisis con este formato EXACTO:
+
+   ---ANALISIS---
+   TEMA: [Cinematica / Dinamica / Trabajo y Energia / Cantidad de Movimiento / Momento Angular]
+   JUSTIFICACION_TEMA: [Explica en 1-2 oraciones por que identificaste este tema. Ejemplo: "Se trata de Dinamica porque el problema involucra fuerzas y la aplicacion de la Segunda Ley de Newton para determinar el movimiento."]
+   GLOSARIO:
+   - $$formula1$$: Explicacion de que significa cada simbolo y por que se usa esta formula en este contexto.
+   - $$formula2$$: Explicacion de que significa cada simbolo y por que se usa esta formula en este contexto.
+   [listar TODAS las formulas usadas]
+   ---FIN_ANALISIS---
+
+   Ejemplo:
+   ---ANALISIS---
+   TEMA: Dinamica - Segunda Ley de Newton
+   JUSTIFICACION_TEMA: Se identifico como Dinamica porque el problema pide calcular fuerzas y aceleraciones a partir de la masa y las condiciones de movimiento del cuerpo, lo cual requiere aplicar la Segunda Ley de Newton.
+   GLOSARIO:
+   - $$\\vec{F} = m \\cdot \\vec{a}$$: Segunda Ley de Newton. F es la fuerza neta (en Newtons), m es la masa del cuerpo (en kg), a es la aceleracion (en m/s²). Se usa porque necesitamos relacionar las fuerzas con el movimiento.
+   - $$P = m \\cdot g$$: Peso del cuerpo. m es la masa, g es la aceleracion gravitatoria (9.8 m/s²). Se usa para calcular la fuerza gravitatoria.
+   ---FIN_ANALISIS---
+
+RECORDATORIO FINAL CRITICO - CODIGO PYTHON OBLIGATORIO:
+SIEMPRE que resuelvas un ejercicio, tu respuesta DEBE incluir bloques ```python con matplotlib.
+Si hay fuerzas: genera un bloque con # GRAFICO_DCL en la primera linea.
+Si hay cinematica: genera un bloque con # GRAFICO_VECTORES en la primera linea que tenga
+  fig, axes = plt.subplots(1, 3) con los 3 sistemas de coordenadas.
+Si hay datos de movimiento vs tiempo: genera un bloque con # GRAFICO_TIEMPO en la primera linea.
+SIN estos bloques de codigo tu respuesta esta INCOMPLETA. NUNCA omitas los graficos.
 
 RESPONDE DE FORMA CLARA Y NO TE SALGAS DE TU ROL.
 """
@@ -350,15 +856,26 @@ class AppFisica(ctk.CTk):
         self.boton_cargar = ctk.CTkButton(left, text="Cargar PDFs de apuntes_catedra", command=self.cargar_pdfs)
         self.boton_cargar.grid(row=4, column=0, padx=16, pady=(0, 10), sticky="ew")
 
-        self.boton_grafico = ctk.CTkButton(left, text="Ejecutar grafico detectado", command=self.ejecutar_grafico_detectado)
+        self.boton_grafico = ctk.CTkButton(
+            left, text="Graficar tiempo / DCL",
+            command=self.ejecutar_grafico_detectado,
+            fg_color="#1a5276", hover_color="#2980b9",
+        )
         self.boton_grafico.grid(row=5, column=0, padx=16, pady=(0, 10), sticky="ew")
+
+        self.boton_vectores = ctk.CTkButton(
+            left, text="Graficar vectores / versores",
+            command=self.ejecutar_vectores_detectado,
+            fg_color="#6c3483", hover_color="#8e44ad",
+        )
+        self.boton_vectores.grid(row=6, column=0, padx=16, pady=(0, 10), sticky="ew")
 
         self.boton_navegador = ctk.CTkButton(
             left, text="Ver formulas en navegador",
             command=self._abrir_en_navegador,
             fg_color="#2d6a4f", hover_color="#40916c",
         )
-        self.boton_navegador.grid(row=6, column=0, padx=16, pady=(0, 16), sticky="ew")
+        self.boton_navegador.grid(row=7, column=0, padx=16, pady=(0, 16), sticky="ew")
 
         # Panel derecho
         right = ctk.CTkFrame(main, corner_radius=16)
@@ -407,41 +924,18 @@ class AppFisica(ctk.CTk):
         self.texto_salida.see("end")
 
     def _render_respuesta(self, texto):
-        # Primero normalizar: convertir [latex] y \[latex\] a $$latex$$
-        texto = normalizar_formulas(texto)
+        """Muestra la respuesta como texto limpio en el panel de la app.
 
-        # Obtener el widget Text interno de CTkTextbox para image_create
-        text_widget = self.texto_salida._textbox
+        Las formulas se muestran como texto legible (sin renderizado matplotlib).
+        Para ver las formulas renderizadas, el usuario usa 'Ver formulas en navegador'.
+        """
+        # Separar la seccion de analisis (solo se muestra en HTML, no en la app)
+        texto, _ = _separar_analisis(texto)
 
-        last_end = 0
-        for match in FORMULA_BLOCK.finditer(texto):
-            # Insertar texto antes de la formula
-            text_before = texto[last_end:match.start()]
-            if text_before:
-                self.texto_salida.insert("end", text_before)
+        # Limpiar LaTeX para texto legible y quitar bloques de codigo
+        texto = _limpiar_para_texto(texto)
 
-            # group(1) = display $$...$$, group(2) = inline $...$
-            is_display = match.group(1) is not None
-            latex = (match.group(1) or match.group(2) or "").strip()
-
-            if latex:
-                try:
-                    fontsize = 16 if is_display else 12
-                    photo = self.formula_renderer.render(latex, fontsize=fontsize)
-                    if is_display:
-                        self.texto_salida.insert("end", "\n")
-                    text_widget.image_create("end", image=photo)
-                    if is_display:
-                        self.texto_salida.insert("end", "\n")
-                except Exception:
-                    self.texto_salida.insert("end", f" {latex} ")
-
-            last_end = match.end()
-
-        # Insertar texto restante despues de la ultima formula
-        remaining = texto[last_end:]
-        if remaining:
-            self.texto_salida.insert("end", remaining)
+        self.texto_salida.insert("end", texto)
         self.texto_salida.see("end")
 
     def _cambiar_estado(self, texto):
@@ -453,6 +947,7 @@ class AppFisica(ctk.CTk):
         self.boton_evaluar.configure(state=estado)
         self.boton_cargar.configure(state=estado)
         self.boton_grafico.configure(state=estado)
+        self.boton_vectores.configure(state=estado)
         self.boton_limpiar.configure(state=estado)
         self.boton_navegador.configure(state=estado)
 
@@ -469,7 +964,7 @@ class AppFisica(ctk.CTk):
             messagebox.showwarning("Atencion", "El asistente todavia se esta inicializando.")
             return
 
-        self._append_salida(f"\n[Tu]\n{pregunta}\n\n")
+        self._append_salida(f"\n{'='*50}\n[Tu]\n{pregunta}\n\n")
         self._set_botones_habilitados(False)
         self._cambiar_estado("Analizando consulta...")
 
@@ -477,10 +972,41 @@ class AppFisica(ctk.CTk):
             try:
                 respuesta = self.asistente.preguntar(pregunta)
                 self._last_response = respuesta
-                self._append_salida("[Agente Fisica]\n")
-                self._render_respuesta(respuesta)
+
+                # Detectar que graficos hay disponibles
+                bloques = self._extraer_bloques_python(respuesta)
+                tiene_tiempo = any(b.startswith("# GRAFICO_TIEMPO") for b in bloques)
+                tiene_vectores = any(b.startswith("# GRAFICO_VECTORES") for b in bloques)
+                tiene_dcl = any(b.startswith("# GRAFICO_DCL") for b in bloques)
+                # Fallback sin marcadores
+                if not (tiene_tiempo or tiene_vectores or tiene_dcl) and bloques:
+                    tiene_tiempo = any("matplotlib" in b.lower() for b in bloques)
+
+                # Mostrar resumen en el panel
+                self._append_salida("[Agente Fisica] Respuesta recibida.\n")
+                self._append_salida("La respuesta completa se abrio en el navegador.\n\n")
+
+                # Indicar graficos disponibles
+                graficos_disponibles = []
+                if tiene_tiempo or tiene_dcl:
+                    graficos_disponibles.append("Graficar tiempo / DCL")
+                if tiene_vectores:
+                    graficos_disponibles.append("Graficar vectores / versores")
+                if not tiene_tiempo and not tiene_dcl and not tiene_vectores and bloques:
+                    graficos_disponibles.append("Graficar tiempo / DCL")
+
+                if graficos_disponibles:
+                    self._append_salida("Graficos detectados - usa los botones:\n")
+                    for g in graficos_disponibles:
+                        self._append_salida(f"  -> {g}\n")
+                else:
+                    self._append_salida("(No se detectaron graficos en esta respuesta)\n")
                 self._append_salida("\n")
-                self._cambiar_estado("Respuesta lista.")
+
+                # Abrir HTML automaticamente
+                abrir_en_navegador(respuesta)
+
+                self._cambiar_estado("Respuesta lista. Ver navegador.")
             except Exception as e:
                 self._append_salida(f"[Error] {e}\n")
                 self._cambiar_estado("Error al consultar.")
@@ -496,17 +1022,20 @@ class AppFisica(ctk.CTk):
 
         self._set_botones_habilitados(False)
         self._cambiar_estado("Ejecutando evaluacion...")
-        self._append_salida("\n[Modo Evaluar] Iniciando prueba conceptual...\n")
+        self._append_salida(f"\n{'='*50}\n[Modo Evaluar] Iniciando prueba conceptual...\n")
 
         def tarea():
             try:
                 pregunta, respuesta = self.asistente.evaluar()
                 self._last_response = respuesta
                 self._append_salida(f"\n[Pregunta de evaluacion]\n{pregunta}\n\n")
-                self._append_salida("[Respuesta del agente]\n")
-                self._render_respuesta(respuesta)
-                self._append_salida("\n")
-                self._cambiar_estado("Evaluacion completada.")
+                self._append_salida("[Agente Fisica] Evaluacion completada.\n")
+                self._append_salida("La respuesta completa se abrio en el navegador.\n")
+
+                # Abrir HTML automaticamente
+                abrir_en_navegador(respuesta)
+
+                self._cambiar_estado("Evaluacion completada. Ver navegador.")
             except Exception as e:
                 self._append_salida(f"[Error en evaluacion] {e}\n")
                 self._cambiar_estado("Error en evaluacion.")
@@ -541,59 +1070,180 @@ class AppFisica(ctk.CTk):
 
         threading.Thread(target=tarea, daemon=True).start()
 
-    def _extraer_codigo_python(self, texto):
-        if "```python" not in texto:
-            return None
+    def _extraer_bloques_python(self, texto):
+        """Extrae TODOS los bloques ```python ... ``` de la respuesta (case-insensitive)."""
+        bloques = []
+        # Buscar con regex para capturar variantes: ```python, ```Python, ``` python, etc.
+        patron = re.compile(r'```[Pp]ython\s*\n(.*?)```', re.DOTALL)
+        for match in patron.finditer(texto):
+            codigo = match.group(1).strip()
+            if codigo:
+                bloques.append(codigo)
+        # Debug: imprimir cuantos bloques se detectaron
+        if bloques:
+            print(f"[DEBUG] Se detectaron {len(bloques)} bloque(s) de codigo Python en la respuesta.")
+            for i, b in enumerate(bloques):
+                primera_linea = b.split('\n')[0][:80]
+                print(f"  Bloque {i+1}: {primera_linea}")
+        else:
+            print("[DEBUG] NO se detectaron bloques ```python en la respuesta.")
+            # Mostrar si hay algun indicio de codigo
+            if "import matplotlib" in texto or "plt." in texto:
+                print("[DEBUG] PERO se encontro 'matplotlib' o 'plt.' en el texto sin bloque de codigo.")
+        return bloques
 
+    def _extraer_codigo_por_tipo(self, texto, marcador):
+        """Extrae bloques de codigo que empiezan con un marcador especifico."""
+        bloques = self._extraer_bloques_python(texto)
+        encontrados = [b for b in bloques if b.startswith(marcador)]
+        return encontrados
+
+    def _extraer_codigo_python(self, texto):
+        """Extrae el primer bloque de codigo Python (compatibilidad)."""
+        bloques = self._extraer_bloques_python(texto)
+        return bloques[0] if bloques else None
+
+    def _ejecutar_bloques(self, bloques, nombre_tipo):
+        """Ejecuta una lista de bloques de codigo Python secuencialmente."""
+        rutas = []
         try:
-            partes = texto.split("```python")
-            codigo_python = partes[1].split("```")[0].strip()
-            return codigo_python
-        except Exception:
-            return None
+            for i, codigo in enumerate(bloques):
+                # Sanitizar argumentos invalidos de matplotlib (head_width, etc.)
+                codigo = _sanitizar_codigo_matplotlib(codigo)
+                # Arreglar backslashes de LaTeX en labels de matplotlib
+                codigo_fijo = _arreglar_latex_en_codigo(codigo)
+                with tempfile.NamedTemporaryFile(
+                    suffix=".py", delete=False, mode="w", encoding="utf-8"
+                ) as archivo_temp:
+                    archivo_temp.write(codigo_fijo)
+                    rutas.append(archivo_temp.name)
+
+            self._append_salida(f"\n[Sistema] Ejecutando {len(bloques)} {nombre_tipo}...\n")
+            self._cambiar_estado(f"Ejecutando {nombre_tipo}...")
+
+            # Debug: guardar copia del codigo para inspeccion
+            for i, codigo in enumerate(bloques):
+                debug_path = os.path.join(tempfile.gettempdir(), f"debug_bloque_{i+1}.py")
+                with open(debug_path, 'w', encoding='utf-8') as df:
+                    df.write(codigo)
+                print(f"[DEBUG] Codigo bloque {i+1} guardado en: {debug_path}")
+
+            errores_totales = []
+            for i, ruta in enumerate(rutas):
+                resultado = subprocess.run(
+                    [sys.executable, ruta],
+                    stderr=subprocess.PIPE, text=True, check=False,
+                )
+
+                if resultado.returncode != 0:
+                    error_msg = (resultado.stderr or "").strip()
+                    lineas_error = error_msg.split('\n')
+                    resumen = '\n'.join(lineas_error[-5:]) if len(lineas_error) > 5 else error_msg
+                    if not resumen:
+                        resumen = f"Codigo de salida: {resultado.returncode}"
+                    errores_totales.append(f"Bloque {i+1}:\n{resumen}")
+                    print(f"[DEBUG] Error en bloque {i+1}:\n{error_msg}")
+
+            if errores_totales:
+                self._append_salida(
+                    f"\n[Error en {nombre_tipo}]\n" + "\n".join(errores_totales) + "\n"
+                )
+                self._cambiar_estado(f"Error al ejecutar {nombre_tipo}.")
+            else:
+                self._cambiar_estado(f"{nombre_tipo} ejecutado(s).")
+        except Exception as e:
+            self._append_salida(f"[Error al ejecutar {nombre_tipo}] {e}\n")
+            self._cambiar_estado(f"Error al ejecutar {nombre_tipo}.")
+        finally:
+            for ruta in rutas:
+                try:
+                    if os.path.exists(ruta):
+                        os.unlink(ruta)
+                except Exception:
+                    pass
 
     def ejecutar_grafico_detectado(self):
-        texto = self.texto_salida.get("1.0", "end")
-        codigo_python = self._extraer_codigo_python(texto)
-
-        if not codigo_python:
-            messagebox.showinfo("Sin grafico", "No se detecto un bloque de codigo Python en la respuesta.")
+        """Ejecuta graficos de tiempo (x(t), v(t), a(t)) y DCL."""
+        if not self._last_response:
+            messagebox.showinfo("Sin respuesta", "No hay respuesta del agente todavia.")
             return
 
-        if "matplotlib" not in codigo_python.lower():
-            messagebox.showwarning(
-                "Atencion",
-                "Se encontro codigo Python, pero no parece ser un grafico con matplotlib.",
-            )
+        todos = self._extraer_bloques_python(self._last_response)
+
+        # Buscar bloques de tiempo y DCL por marcador
+        bloques_tiempo = [b for b in todos if b.startswith("# GRAFICO_TIEMPO")]
+        bloques_dcl = [b for b in todos if b.startswith("# GRAFICO_DCL")]
+        bloques = bloques_tiempo + bloques_dcl
+
+        # Si no hay bloques con marcador, buscar bloques con matplotlib
+        # que NO sean de vectores (compatibilidad con respuestas sin marcador)
+        if not bloques:
+            keywords_vectores = ["quiver", "u_r", "u_theta", "Cartesian", "Polar", "Intrins"]
+            bloques = [b for b in todos
+                       if "matplotlib" in b.lower()
+                       and not b.startswith("# GRAFICO_VECTORES")
+                       and not any(kw in b for kw in keywords_vectores)]
+
+        if not bloques:
+            total = len(todos)
+            msg = "No se detecto un grafico de tiempo o DCL en la respuesta."
+            if total == 0:
+                msg += "\n\nGemini no genero ningun bloque de codigo Python."
+                msg += "\nProba volviendo a enviar la consulta."
+            else:
+                msg += f"\n\nSe encontraron {total} bloque(s) de codigo, pero ninguno es de tiempo/DCL."
+                msg += "\nSi buscas vectores/versores, usa el boton 'Graficar vectores'."
+            messagebox.showinfo("Sin grafico", msg)
             return
 
         confirmar = messagebox.askyesno(
             "Confirmacion",
-            "Se detecto codigo Python con matplotlib. Deseas ejecutarlo ahora?",
+            f"Se detectaron {len(bloques)} grafico(s) de tiempo/DCL. Deseas ejecutarlos?",
         )
-        if not confirmar:
+        if confirmar:
+            self._ejecutar_bloques(bloques, "grafico(s) de tiempo/DCL")
+
+    def ejecutar_vectores_detectado(self):
+        """Ejecuta el diagrama de vectores y versores en todas las coordenadas."""
+        if not self._last_response:
+            messagebox.showinfo("Sin respuesta", "No hay respuesta del agente todavia.")
             return
 
-        try:
-            with tempfile.NamedTemporaryFile(
-                suffix=".py", delete=False, mode="w", encoding="utf-8"
-            ) as archivo_temp:
-                archivo_temp.write(codigo_python)
-                ruta_temporal = archivo_temp.name
+        # Buscar bloques de vectores por marcador
+        # Debug
+        bloques = self._extraer_codigo_por_tipo(self._last_response, "# GRAFICO_VECTORES")
 
-            self._append_salida("\n[Sistema] Ejecutando grafico detectado...\n")
-            self._cambiar_estado("Ejecutando grafico...")
-            subprocess.run([sys.executable, ruta_temporal], check=False)
-            self._cambiar_estado("Grafico ejecutado.")
-        except Exception as e:
-            self._append_salida(f"[Error al ejecutar grafico] {e}\n")
-            self._cambiar_estado("Error al ejecutar grafico.")
-        finally:
-            try:
-                if 'ruta_temporal' in locals() and os.path.exists(ruta_temporal):
-                    os.unlink(ruta_temporal)
-            except Exception:
-                pass
+        # Fallback: buscar bloques que mencionen quiver, versores, etc.
+        if not bloques:
+            todos = self._extraer_bloques_python(self._last_response)
+            # Keywords especificos de diagramas de vectores (no de graficos de tiempo)
+            keywords_vectores = ["quiver", "u_r", "u_theta", "u_t", "u_n",
+                                 "versor", "Cartesian", "Polar", "Intrins",
+                                 "cartesian", "polar", "intrins"]
+            bloques = [b for b in todos
+                       if "matplotlib" in b.lower()
+                       and any(kw in b for kw in keywords_vectores)
+                       and not b.startswith("# GRAFICO_TIEMPO")
+                       and not b.startswith("# GRAFICO_DCL")]
+
+        if not bloques:
+            total = len(self._extraer_bloques_python(self._last_response))
+            msg = "No se detecto un diagrama de vectores/versores en la respuesta."
+            if total == 0:
+                msg += "\n\nGemini no genero ningun bloque de codigo Python."
+                msg += "\nProba volviendo a enviar la consulta."
+            else:
+                msg += f"\n\nSe encontraron {total} bloque(s) de codigo, pero ninguno es de vectores."
+                msg += "\nProba con el boton 'Graficar tiempo / DCL'."
+            messagebox.showinfo("Sin diagrama de vectores", msg)
+            return
+
+        confirmar = messagebox.askyesno(
+            "Confirmacion",
+            f"Se detecto {len(bloques)} diagrama(s) de vectores/versores. Deseas ejecutarlo?",
+        )
+        if confirmar:
+            self._ejecutar_bloques(bloques, "diagrama(s) de vectores")
 
     def _abrir_en_navegador(self):
         if not self._last_response:
