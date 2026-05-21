@@ -31,7 +31,9 @@ ctk.set_default_color_theme("blue")
 # ==========================================================
 def normalizar_formulas(texto):
     """Convierte todos los formatos de formulas LaTeX a $$...$$ para procesarlos igual."""
-    # \[...\] con backslash -> $$...$$
+    # \(...\) inline -> $...$  (MathJax inline)
+    texto = re.sub(r'\\\((.+?)\\\)', r'$\1$', texto)
+    # \[...\] display -> $$...$$
     texto = re.sub(r'\\\[(.+?)\\\]', r'$$\1$$', texto, flags=re.DOTALL)
     # [...] sin backslash pero con comandos LaTeX (como \vec, \frac, etc) -> $$...$$
     texto = re.sub(
@@ -229,24 +231,24 @@ def _arreglar_latex_en_codigo(codigo):
 def _sanitizar_codigo_matplotlib(codigo):
     """Arregla errores comunes en codigo matplotlib generado por Gemini.
 
-    Gemini a veces usa argumentos invalidos como head_width, head_length, width
+    Gemini a veces usa argumentos invalidos como head_width, head_length
     dentro de arrowprops de FancyArrowPatch, lo cual causa AttributeError.
-    Esta funcion los remueve automaticamente.
+    Esta funcion los remueve SOLO dentro de arrowprops=dict(...).
     """
-    # Remover argumentos invalidos de arrowprops que causan FancyArrowPatch errors
-    # head_width, head_length, width no son validos cuando se usa arrowstyle
-    args_invalidos = ['head_width', 'head_length', 'width']
-    for arg in args_invalidos:
-        # Patron: arg=valor (numerico o variable) seguido de coma o cierre de parentesis
-        codigo = re.sub(
-            rf",?\s*{arg}\s*=\s*[^,\)]+",
-            '',
-            codigo,
-        )
-    # Limpiar comas dobles o coma antes de cierre que queden
-    codigo = re.sub(r',\s*,', ',', codigo)
-    codigo = re.sub(r',\s*\)', ')', codigo)
-    codigo = re.sub(r'\(\s*,', '(', codigo)
+    # Remover argumentos invalidos SOLO dentro de arrowprops=dict(...)
+    # head_width y head_length no son validos cuando se usa arrowstyle
+    def limpiar_arrowprops(match):
+        contenido = match.group(1)
+        # Solo remover head_width, head_length dentro de arrowprops
+        for arg in ['head_width', 'head_length']:
+            contenido = re.sub(rf",?\s*{arg}\s*=\s*[^,\)]+", '', contenido)
+        # Limpiar comas sobrantes
+        contenido = re.sub(r',\s*,', ',', contenido)
+        contenido = re.sub(r',\s*\)', ')', contenido)
+        contenido = re.sub(r'\(\s*,', '(', contenido)
+        return f'arrowprops=dict({contenido})'
+
+    codigo = re.sub(r'arrowprops\s*=\s*dict\(([^)]*)\)', limpiar_arrowprops, codigo)
 
     # Si Gemini uso plt.quiver, intentar convertir a plt.annotate
     # (quiver da problemas de escala frecuentemente)
@@ -359,65 +361,157 @@ def _markdown_a_html(texto):
             nota = "Diagrama de cuerpo libre"
         else:
             nota = "Grafico"
-        return f'\n<div class="codigo-nota">📊 {nota} — ejecutar desde la app con los botones de graficos.</div>\n'
+        return f'\n\n[GRAFICO:{nota}]\n\n'
 
     texto = re.sub(r'```[Pp]ython\s*\n(.*?)```', reemplazo_codigo, texto, flags=re.DOTALL)
     texto = re.sub(r'```\w*\s*\n(.*?)```', reemplazo_codigo, texto, flags=re.DOTALL)
 
-    # 2. Escapar HTML (pero preservar $$ para MathJax)
-    # Guardar formulas temporalmente
+    # 2. Proteger formulas LaTeX antes de cualquier procesamiento
+    #    Usar caracteres Unicode PUA (Private Use Area) como placeholders
+    #    en lugar de NULL bytes que pueden causar problemas en HTML
     formulas = []
+    PH_START = '￾'  # Unicode noncharacter (seguro para placeholder)
+    PH_END = '￿'    # Unicode noncharacter (seguro para placeholder)
+
     def guardar_formula(match):
         formulas.append(match.group(0))
-        return f'\x00FORMULA{len(formulas)-1}\x00'
+        return f'{PH_START}F{len(formulas)-1}{PH_END}'
+    # Display primero ($$...$$), luego inline ($...$)
     texto = re.sub(r'\$\$.*?\$\$', guardar_formula, texto, flags=re.DOTALL)
     texto = re.sub(r'\$[^\$\n]+?\$', guardar_formula, texto)
 
-    # Escapar HTML
+    # 3. Escapar HTML
     texto = texto.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
-    # Restaurar formulas
+    # 4. Procesar markdown por parrafos (separados por lineas en blanco)
+    bloques = re.split(r'\n{2,}', texto)
+    html_bloques = []
+
+    for bloque in bloques:
+        bloque = bloque.strip()
+        if not bloque:
+            continue
+
+        # Placeholder de grafico
+        grafico_match = re.match(r'\[GRAFICO:(.+?)\]', bloque)
+        if grafico_match:
+            nota = grafico_match.group(1)
+            html_bloques.append(
+                f'<div class="codigo-nota">\U0001f4ca {nota} '
+                f'— ejecutar desde la app con los botones de graficos.</div>'
+            )
+            continue
+
+        # Encabezados
+        h_match = re.match(r'^(#{1,4})\s+(.+)$', bloque)
+        if h_match:
+            nivel = len(h_match.group(1))
+            html_bloques.append(f'<h{nivel}>{h_match.group(2)}</h{nivel}>')
+            continue
+
+        # Linea horizontal
+        if re.match(r'^---+\s*$', bloque):
+            html_bloques.append('<hr>')
+            continue
+
+        # Listas (viñetas o numeradas)
+        lineas = bloque.split('\n')
+        es_lista = all(
+            re.match(r'^\s*[\*\-]\s+', l) or re.match(r'^\s*\d+\.\s+', l) or not l.strip()
+            for l in lineas
+        )
+        if es_lista and any(l.strip() for l in lineas):
+            items = []
+            for l in lineas:
+                l = l.strip()
+                if not l:
+                    continue
+                # Quitar marcador de lista
+                l = re.sub(r'^\s*[\*\-]\s+', '', l)
+                l = re.sub(r'^\s*\d+\.\s+', '', l)
+                items.append(f'<li>{l}</li>')
+            html_bloques.append('<ul>' + ''.join(items) + '</ul>')
+            continue
+
+        # Parrafo normal: unir lineas consecutivas en un solo flujo
+        contenido = ' '.join(l.strip() for l in lineas if l.strip())
+
+        # Negritas e italicas
+        contenido = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', contenido)
+        contenido = re.sub(r'\*([^\*]+?)\*', r'<em>\1</em>', contenido)
+
+        html_bloques.append(f'<p>{contenido}</p>')
+
+    # 5. Post-procesamiento: fusionar parrafos cortos consecutivos
+    #    Gemini a menudo pone cada dato en un parrafo separado (double newline),
+    #    lo que genera muchos <p> individuales que se ven "hacia abajo".
+    #    Fusionamos parrafos cortos consecutivos (sin headings entre ellos)
+    #    en un solo <p> con <br> entre ellos para mantener la compacidad visual.
+    fusionados = []
+    buffer_cortos = []
+
+    # Indices de formulas display ($$...$$) para no fusionarlos
+    display_indices = set()
+    for i, f in enumerate(formulas):
+        if f.startswith('$$'):
+            display_indices.add(i)
+
+    def es_parrafo_fusionable(html_str):
+        """Determina si un <p> puede fusionarse con los vecinos."""
+        if not html_str.startswith('<p>'):
+            return False
+        contenido = html_str[3:-4]  # quitar <p> y </p>
+        # No fusionar si es solo una formula display (placeholder)
+        for idx in display_indices:
+            ph = f'{PH_START}F{idx}{PH_END}'
+            if contenido.strip() == ph:
+                return False
+        return True
+
+    def es_inicio_seccion(html_str):
+        """Detecta si un parrafo empieza con un encabezado bold (nueva seccion)."""
+        if not html_str.startswith('<p>'):
+            return False
+        contenido = html_str[3:-4].strip()
+        # Empieza con <strong> y termina con :</strong> → es titulo de seccion
+        if contenido.startswith('<strong>') and ':</strong>' in contenido:
+            # Solo si es corto (titulo, no parrafo largo con bold)
+            texto_sin_tags = re.sub(r'<[^>]+>', '', contenido)
+            if len(texto_sin_tags) < 80:
+                return True
+        return False
+
+    def flush_buffer():
+        if not buffer_cortos:
+            return
+        if len(buffer_cortos) == 1:
+            fusionados.append(buffer_cortos[0])
+        else:
+            # Extraer contenido de cada <p>...</p> y unir con <br>
+            partes = []
+            for p in buffer_cortos:
+                partes.append(p[3:-4])  # quitar <p> y </p>
+            fusionados.append('<p>' + '<br>\n'.join(partes) + '</p>')
+        buffer_cortos.clear()
+
+    for bloque_html in html_bloques:
+        if es_parrafo_fusionable(bloque_html):
+            # Si es inicio de una nueva seccion, cerrar el grupo anterior
+            if es_inicio_seccion(bloque_html) and buffer_cortos:
+                flush_buffer()
+            buffer_cortos.append(bloque_html)
+        else:
+            flush_buffer()
+            fusionados.append(bloque_html)
+    flush_buffer()
+
+    resultado = '\n'.join(fusionados)
+
+    # 6. Restaurar formulas
     for i, formula in enumerate(formulas):
-        texto = texto.replace(f'\x00FORMULA{i}\x00', formula)
+        resultado = resultado.replace(f'{PH_START}F{i}{PH_END}', formula)
 
-    # 3. Markdown -> HTML
-    # Encabezados
-    texto = re.sub(r'^#### (.+)$', r'<h4>\1</h4>', texto, flags=re.MULTILINE)
-    texto = re.sub(r'^### (.+)$', r'<h3>\1</h3>', texto, flags=re.MULTILINE)
-    texto = re.sub(r'^## (.+)$', r'<h2>\1</h2>', texto, flags=re.MULTILINE)
-    texto = re.sub(r'^# (.+)$', r'<h1>\1</h1>', texto, flags=re.MULTILINE)
-
-    # Negritas
-    texto = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', texto)
-    # Italicas
-    texto = re.sub(r'\*([^\*]+?)\*', r'<em>\1</em>', texto)
-
-    # Lineas horizontales
-    texto = re.sub(r'^---+\s*$', '<hr>', texto, flags=re.MULTILINE)
-
-    # Listas con viñetas
-    texto = re.sub(r'^\s*[\*\-]\s+(.+)$', r'<li>\1</li>', texto, flags=re.MULTILINE)
-    # Agrupar <li> consecutivos en <ul>
-    texto = re.sub(r'((?:<li>.*?</li>\s*)+)', r'<ul>\1</ul>', texto, flags=re.DOTALL)
-
-    # Listas numeradas
-    texto = re.sub(r'^\s*(\d+)\.\s+(.+)$', r'<li>\2</li>', texto, flags=re.MULTILINE)
-
-    # 4. Parrafos: convertir doble salto de linea a cierre/apertura de parrafo
-    #    y saltos simples a <br> solo donde tiene sentido
-    texto = re.sub(r'\n{2,}', '</p>\n<p>', texto)
-    texto = re.sub(r'(?<!</p>)\n(?!<)', '<br>\n', texto)
-
-    # Envolver en <p> si no empieza con tag
-    if not texto.strip().startswith('<'):
-        texto = '<p>' + texto + '</p>'
-
-    # Limpiar parrafos vacios y <br> sueltos despues de tags de bloque
-    texto = re.sub(r'<p>\s*</p>', '', texto)
-    texto = re.sub(r'(<(?:h[1-4]|hr|ul|li|div)[^>]*>)\s*<br>', r'\1', texto)
-    texto = re.sub(r'<br>\s*(<(?:/li|/ul|h[1-4]|hr|div))', r'\1', texto)
-
-    return texto
+    return resultado
 
 
 def abrir_en_navegador(response_text):
@@ -437,7 +531,17 @@ def abrir_en_navegador(response_text):
 <title>Respuesta - Asistente Fisica I</title>
 <script>
 MathJax = {{
-  tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']] }}
+  tex: {{
+    inlineMath: [['$', '$']],
+    displayMath: [['$$', '$$']],
+    processEscapes: true
+  }},
+  options: {{
+    renderActions: {{
+      addMenu: [0, '', '']
+    }},
+    enableEnrichment: false
+  }}
 }};
 </script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
@@ -445,12 +549,18 @@ MathJax = {{
 body {{ font-family: 'Segoe UI', Tahoma, sans-serif; max-width: 900px; margin: 40px auto;
        padding: 24px; background: #1a1a2e; color: #e0e0e0; line-height: 1.8; font-size: 16px; }}
 h1,h2,h3,h4 {{ color: #4ea8de; margin-top: 1.2em; }}
+p {{ margin: 4px 0; }}
 strong {{ color: #7ec8e3; }}
 em {{ color: #c4c4c4; }}
 hr {{ border: none; border-top: 1px solid #2d4a6f; margin: 28px 0; }}
 ul {{ padding-left: 24px; }}
 li {{ margin: 6px 0; }}
-.MathJax {{ font-size: 115% !important; }}
+
+/* MathJax: forzar inline para formulas $...$ y corregir tamanio */
+mjx-container {{ display: inline !important; }}
+mjx-container[display="true"] {{ display: block !important; text-align: center; margin: 0.8em 0; }}
+.MathJax {{ font-size: 115% !important; display: inline !important; }}
+mjx-container[display="true"] .MathJax {{ display: block !important; }}
 
 /* Nota de grafico (reemplazo del bloque de codigo) */
 .codigo-nota {{
@@ -618,12 +728,19 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
      # GRAFICO_VECTORES -> para diagramas de vectores, versores y coordenadas
      # GRAFICO_DCL      -> para diagramas de cuerpo libre
 
-   A) DIAGRAMA DE CUERPO LIBRE (DCL/DCA): Si hay fuerzas involucradas, dibuja el diagrama
-      mostrando TODAS las fuerzas con flechas (plt.annotate con arrowprops), el cuerpo como
-      un punto o rectangulo, ejes coordenados, y etiquetas con el nombre de cada fuerza.
-      Usa colores distintos: rojo para peso, azul para normal, verde para fuerzas aplicadas,
-      naranja para friccion, etc.
+   A) DIAGRAMA DE CUERPO LIBRE (DCL/DCA): Si hay fuerzas involucradas, dibuja el diagrama.
       Primera linea del bloque: # GRAFICO_DCL
+      Usa fig, ax = plt.subplots(figsize=(10, 8)) con ax.set_aspect('equal').
+      El cuerpo debe ser un rectangulo o punto en el CENTRO del grafico.
+      TODAS las flechas de fuerza deben partir del centro del cuerpo.
+      TODAS las flechas deben tener la MISMA longitud visual (escalar a ~3 unidades).
+      Colores: rojo=peso, azul=normal, verde=fuerza aplicada, naranja=friccion.
+      Etiquetas grandes (fontsize=14) al lado de la punta de cada flecha.
+      Incluir leyenda con ax.legend().
+      Usar SOLO ax.annotate con arrowprops=dict(arrowstyle='->', color=COLOR, lw=2.5).
+      NUNCA uses head_width, head_length ni width en arrowprops.
+      Incluir ejes coordenados (x', y' si es plano inclinado) con flechas grises.
+      El grafico debe tener limites simetricos y centrados en el cuerpo.
 
    B) VECTORES Y VERSORES - TODO EN UN SOLO GRAFICO:
       En ejercicios de cinematica, genera UN UNICO bloque de codigo Python que dibuje

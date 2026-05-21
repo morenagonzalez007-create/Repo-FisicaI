@@ -118,12 +118,19 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
      # GRAFICO_VECTORES -> para diagramas de vectores, versores y coordenadas
      # GRAFICO_DCL      -> para diagramas de cuerpo libre
 
-   A) DIAGRAMA DE CUERPO LIBRE (DCL/DCA): Si hay fuerzas involucradas, dibuja el diagrama
-      mostrando TODAS las fuerzas con flechas (plt.annotate con arrowprops), el cuerpo como
-      un punto o rectangulo, ejes coordenados, y etiquetas con el nombre de cada fuerza.
-      Usa colores distintos: rojo para peso, azul para normal, verde para fuerzas aplicadas,
-      naranja para friccion, etc.
+   A) DIAGRAMA DE CUERPO LIBRE (DCL/DCA): Si hay fuerzas involucradas, dibuja el diagrama.
       Primera linea del bloque: # GRAFICO_DCL
+      Usa fig, ax = plt.subplots(figsize=(10, 8)) con ax.set_aspect('equal').
+      El cuerpo debe ser un rectangulo o punto en el CENTRO del grafico.
+      TODAS las flechas de fuerza deben partir del centro del cuerpo.
+      TODAS las flechas deben tener la MISMA longitud visual (escalar a ~3 unidades).
+      Colores: rojo=peso, azul=normal, verde=fuerza aplicada, naranja=friccion.
+      Etiquetas grandes (fontsize=14) al lado de la punta de cada flecha.
+      Incluir leyenda con ax.legend().
+      Usar SOLO ax.annotate con arrowprops=dict(arrowstyle='->', color=COLOR, lw=2.5).
+      NUNCA uses head_width, head_length ni width en arrowprops.
+      Incluir ejes coordenados (x', y' si es plano inclinado) con flechas grises.
+      El grafico debe tener limites simetricos y centrados en el cuerpo.
 
    B) VECTORES Y VERSORES - TODO EN UN SOLO GRAFICO:
       En ejercicios de cinematica, genera UN UNICO bloque de codigo Python que dibuje
