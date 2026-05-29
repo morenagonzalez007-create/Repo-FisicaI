@@ -366,7 +366,53 @@ def _markdown_a_html(texto):
     texto = re.sub(r'```[Pp]ython\s*\n(.*?)```', reemplazo_codigo, texto, flags=re.DOTALL)
     texto = re.sub(r'```\w*\s*\n(.*?)```', reemplazo_codigo, texto, flags=re.DOTALL)
 
-    # 2. Proteger formulas LaTeX antes de cualquier procesamiento
+    # 2. Convertir "falso display" a inline
+    #    Gemini usa $$formula$$ (display/centrado) para formulas que deberian ser
+    #    inline $formula$ cuando estan dentro de una oracion. Detectamos esto
+    #    mirando las lineas anterior y siguiente: si hay texto normal alrededor,
+    #    la formula deberia ser inline.
+    lineas_pre = texto.split('\n')
+    for i, linea in enumerate(lineas_pre):
+        stripped = linea.strip()
+        # Solo procesar lineas que son UNICAMENTE una formula $$...$$
+        if not re.match(r'^\$\$[^$]+\$\$$', stripped):
+            continue
+
+        # Buscar linea anterior no vacia
+        prev = ""
+        for j in range(i - 1, -1, -1):
+            if lineas_pre[j].strip():
+                prev = lineas_pre[j].strip()
+                break
+
+        # Buscar linea siguiente no vacia
+        next_l = ""
+        for j in range(i + 1, len(lineas_pre)):
+            if lineas_pre[j].strip():
+                next_l = lineas_pre[j].strip()
+                break
+
+        # Es "falso display" si:
+        # - La linea anterior es texto normal (no termina en : ni es heading/vacia)
+        # - O la linea siguiente empieza con minuscula, coma, punto, parentesis, etc.
+        prev_es_texto = (prev
+                         and not prev.endswith(':')
+                         and not prev.startswith('#')
+                         and not prev.startswith('---')
+                         and not re.match(r'^\$\$', prev))
+        next_continua = (next_l
+                         and len(next_l) > 0
+                         and (next_l[0].islower()
+                              or next_l[0] in ',.;:)]}'))
+
+        if prev_es_texto or next_continua:
+            # Convertir $$...$$ a $...$ (inline)
+            inner = stripped[2:-2]
+            lineas_pre[i] = f'${inner}$'
+
+    texto = '\n'.join(lineas_pre)
+
+    # 3. Proteger formulas LaTeX (ahora con display/inline correctos)
     #    Usar caracteres Unicode PUA (Private Use Area) como placeholders
     #    en lugar de NULL bytes que pueden causar problemas en HTML
     formulas = []
@@ -380,10 +426,59 @@ def _markdown_a_html(texto):
     texto = re.sub(r'\$\$.*?\$\$', guardar_formula, texto, flags=re.DOTALL)
     texto = re.sub(r'\$[^\$\n]+?\$', guardar_formula, texto)
 
-    # 3. Escapar HTML
+    # 4. Colapsar lineas sueltas en parrafos fluidos
+    #    Gemini pone formulas inline ($...$) en su propia linea, generando:
+    #      "Para un pendulo de longitud fija\n$L$\n, el radio..."
+    #    Esto se ve horrible. Unimos esas lineas sueltas con la anterior.
+    #
+    #    Indices de formulas display para no colapsarlas
+    display_formula_indices = set()
+    for i, f in enumerate(formulas):
+        if f.startswith('$$'):
+            display_formula_indices.add(i)
+
+    def es_linea_display(linea):
+        """Verifica si una linea es SOLO un placeholder de formula display."""
+        stripped = linea.strip()
+        m = re.match(rf'^{re.escape(PH_START)}F(\d+){re.escape(PH_END)}$', stripped)
+        if m and int(m.group(1)) in display_formula_indices:
+            return True
+        return False
+
+    def es_linea_especial(linea):
+        """Lineas que NO deben colapsarse con la anterior."""
+        stripped = linea.strip()
+        if not stripped:
+            return True  # linea vacia = separador de parrafo
+        if stripped.startswith('#'):
+            return True  # heading
+        if re.match(r'^[\*\-]\s+', stripped) or re.match(r'^\d+\.\s+', stripped):
+            return True  # item de lista
+        if stripped.startswith('[GRAFICO:'):
+            return True  # placeholder de grafico
+        if stripped.startswith('---'):
+            return True  # linea horizontal
+        if es_linea_display(linea):
+            return True  # formula display $$...$$ en su propia linea
+        return False
+
+    lineas = texto.split('\n')
+    colapsado = []
+    for linea in lineas:
+        if es_linea_especial(linea):
+            # Mantener en su propia linea
+            colapsado.append(linea)
+        elif colapsado and not es_linea_especial(colapsado[-1]):
+            # Unir con la linea anterior (agregar espacio)
+            colapsado[-1] = colapsado[-1].rstrip() + ' ' + linea.strip()
+        else:
+            colapsado.append(linea)
+    texto = '\n'.join(colapsado)
+
+    # 5. Escapar HTML
     texto = texto.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
-    # 4. Procesar markdown por parrafos (separados por lineas en blanco)
+    # 6. Procesar markdown por parrafos (separados por lineas en blanco)
     bloques = re.split(r'\n{2,}', texto)
     html_bloques = []
 
@@ -442,7 +537,7 @@ def _markdown_a_html(texto):
 
         html_bloques.append(f'<p>{contenido}</p>')
 
-    # 5. Post-procesamiento: fusionar parrafos cortos consecutivos
+    # 7. Post-procesamiento: fusionar parrafos cortos consecutivos
     #    Gemini a menudo pone cada dato en un parrafo separado (double newline),
     #    lo que genera muchos <p> individuales que se ven "hacia abajo".
     #    Fusionamos parrafos cortos consecutivos (sin headings entre ellos)
@@ -450,19 +545,13 @@ def _markdown_a_html(texto):
     fusionados = []
     buffer_cortos = []
 
-    # Indices de formulas display ($$...$$) para no fusionarlos
-    display_indices = set()
-    for i, f in enumerate(formulas):
-        if f.startswith('$$'):
-            display_indices.add(i)
-
     def es_parrafo_fusionable(html_str):
         """Determina si un <p> puede fusionarse con los vecinos."""
         if not html_str.startswith('<p>'):
             return False
         contenido = html_str[3:-4]  # quitar <p> y </p>
         # No fusionar si es solo una formula display (placeholder)
-        for idx in display_indices:
+        for idx in display_formula_indices:
             ph = f'{PH_START}F{idx}{PH_END}'
             if contenido.strip() == ph:
                 return False
@@ -507,7 +596,7 @@ def _markdown_a_html(texto):
 
     resultado = '\n'.join(fusionados)
 
-    # 6. Restaurar formulas
+    # 8. Restaurar formulas
     for i, formula in enumerate(formulas):
         resultado = resultado.replace(f'{PH_START}F{i}{PH_END}', formula)
 
@@ -731,16 +820,62 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
    A) DIAGRAMA DE CUERPO LIBRE (DCL/DCA): Si hay fuerzas involucradas, dibuja el diagrama.
       Primera linea del bloque: # GRAFICO_DCL
       Usa fig, ax = plt.subplots(figsize=(10, 8)) con ax.set_aspect('equal').
-      El cuerpo debe ser un rectangulo o punto en el CENTRO del grafico.
-      TODAS las flechas de fuerza deben partir del centro del cuerpo.
-      TODAS las flechas deben tener la MISMA longitud visual (escalar a ~3 unidades).
-      Colores: rojo=peso, azul=normal, verde=fuerza aplicada, naranja=friccion.
-      Etiquetas grandes (fontsize=14) al lado de la punta de cada flecha.
-      Incluir leyenda con ax.legend().
-      Usar SOLO ax.annotate con arrowprops=dict(arrowstyle='->', color=COLOR, lw=2.5).
-      NUNCA uses head_width, head_length ni width en arrowprops.
-      Incluir ejes coordenados (x', y' si es plano inclinado) con flechas grises.
-      El grafico debe tener limites simetricos y centrados en el cuerpo.
+
+      REGLAS FISICAS OBLIGATORIAS PARA EL DCL:
+      - El cuerpo (masa) debe ser un punto GRANDE o rectangulo en su posicion real.
+      - TODAS las flechas de fuerza PARTEN DESDE EL CENTRO DEL CUERPO (la masa).
+      - El PESO (P = mg) es SIEMPRE una flecha VERTICAL HACIA ABAJO desde la masa.
+        No importa si el sistema esta inclinado, rotado o es un pendulo: el peso
+        SIEMPRE apunta en la direccion -y (hacia el suelo). Color: ROJO.
+      - La TENSION de una cuerda va DESDE la masa HACIA el punto de sujecion,
+        a lo largo de la cuerda. Color: AZUL.
+      - La NORMAL es SIEMPRE perpendicular a la superficie de contacto,
+        apuntando HACIA AFUERA de la superficie. Color: AZUL.
+      - La FRICCION es SIEMPRE tangente a la superficie, opuesta al movimiento. Color: NARANJA.
+      - Fuerzas aplicadas externas: Color VERDE.
+      - Fuerza de arrastre/resistencia del aire: Color NARANJA, opuesta a la velocidad.
+        SOLO incluirla si el problema EXPLICITAMENTE menciona resistencia del aire.
+
+      REGLAS DE DIBUJO:
+      - TODAS las flechas deben tener la MISMA longitud visual (~3 unidades).
+      - Etiquetas grandes (fontsize=14) al lado de la punta de cada flecha.
+      - Usar SOLO ax.annotate con arrowprops=dict(arrowstyle='->', color=COLOR, lw=2.5).
+      - NUNCA uses head_width, head_length ni width en arrowprops.
+      - Incluir ejes coordenados con flechas grises.
+      - El grafico debe tener limites simetricos y centrados en el cuerpo.
+      - Incluir leyenda con ax.legend().
+      - Si el problema tiene geometria (pendulo, plano inclinado), dibujar
+        tambien la estructura (cuerda, superficie) en color negro/gris.
+
+      PARA PENDULOS ESPECIFICAMENTE:
+      - Dibujar el punto de suspension (pivote) como un punto gris arriba.
+      - Dibujar la cuerda como una linea negra desde el pivote hasta la masa.
+      - La masa esta en el extremo inferior de la cuerda.
+      - El peso va RECTO HACIA ABAJO desde la masa (no a lo largo de la cuerda).
+      - La tension va DESDE LA MASA HACIA EL PIVOTE (a lo largo de la cuerda).
+
+      PARA PLANOS INCLINADOS ESPECIFICAMENTE:
+      - Dibujar la superficie inclinada como una linea GRIS GRUESA (lw=3).
+      - La masa se dibuja SOBRE la superficie, NO flotando en el aire.
+      - Normal: PERPENDICULAR a la superficie inclinada, apuntando HACIA AFUERA de la superficie.
+        Si el plano tiene angulo alpha con la horizontal, la Normal forma angulo alpha con la vertical.
+      - Friccion (si existe): TANGENTE a la superficie, OPUESTA al movimiento o tendencia de movimiento.
+      - Peso: SIEMPRE VERTICAL HACIA ABAJO, sin importar la inclinacion del plano.
+      - Si hay cuerda: dibujar la cuerda y la tension va A LO LARGO de ella hacia el punto de sujecion.
+      - NO mezclar estas reglas con las de pendulos ni conos.
+
+      PARA SUPERFICIES CONICAS ESPECIFICAMENTE:
+      - Dibujar el PERFIL del cono (las dos paredes inclinadas) como lineas GRISES gruesas (lw=3)
+        formando una V invertida o V segun la orientacion del cono.
+      - La masa se dibuja SOBRE la pared del cono, NO en el centro ni en el vertice.
+      - Normal: PERPENDICULAR a la PARED CONICA, apuntando hacia el INTERIOR del cono (hacia el eje).
+        En un cono con semiangulo alpha, la Normal forma angulo alpha con la horizontal.
+      - Tension (si hay cuerda que pasa por el vertice): va DESDE LA MASA HACIA EL VERTICE del cono,
+        A LO LARGO de la cuerda. NO apunta hacia arriba ni al aire.
+      - Peso: SIEMPRE VERTICAL HACIA ABAJO desde la masa.
+      - Si hay una pesa colgando del otro extremo de la cuerda, hacer DOS subplots separados:
+        uno para el objeto sobre el cono y otro para la pesa colgante (con su propio DCL).
+      - NO mezclar estas reglas con las de pendulos ni planos inclinados.
 
    B) VECTORES Y VERSORES - TODO EN UN SOLO GRAFICO:
       En ejercicios de cinematica, genera UN UNICO bloque de codigo Python que dibuje
@@ -1221,7 +1356,7 @@ class AppFisica(ctk.CTk):
         return bloques[0] if bloques else None
 
     def _ejecutar_bloques(self, bloques, nombre_tipo):
-        """Ejecuta una lista de bloques de codigo Python secuencialmente."""
+        """Ejecuta una lista de bloques de codigo Python en PARALELO."""
         rutas = []
         try:
             for i, codigo in enumerate(bloques):
@@ -1245,19 +1380,25 @@ class AppFisica(ctk.CTk):
                     df.write(codigo)
                 print(f"[DEBUG] Codigo bloque {i+1} guardado en: {debug_path}")
 
-            errores_totales = []
-            for i, ruta in enumerate(rutas):
-                resultado = subprocess.run(
+            # Lanzar TODOS los graficos en paralelo (Popen no bloquea)
+            procesos = []
+            for ruta in rutas:
+                proc = subprocess.Popen(
                     [sys.executable, ruta],
-                    stderr=subprocess.PIPE, text=True, check=False,
+                    stderr=subprocess.PIPE, text=True,
                 )
+                procesos.append(proc)
 
-                if resultado.returncode != 0:
-                    error_msg = (resultado.stderr or "").strip()
+            # Esperar a que todos terminen y recolectar errores
+            errores_totales = []
+            for i, proc in enumerate(procesos):
+                proc.wait()
+                if proc.returncode != 0:
+                    error_msg = (proc.stderr.read() if proc.stderr else "").strip()
                     lineas_error = error_msg.split('\n')
                     resumen = '\n'.join(lineas_error[-5:]) if len(lineas_error) > 5 else error_msg
                     if not resumen:
-                        resumen = f"Codigo de salida: {resultado.returncode}"
+                        resumen = f"Codigo de salida: {proc.returncode}"
                     errores_totales.append(f"Bloque {i+1}:\n{resumen}")
                     print(f"[DEBUG] Error en bloque {i+1}:\n{error_msg}")
 

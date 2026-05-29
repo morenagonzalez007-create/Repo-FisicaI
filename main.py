@@ -121,16 +121,62 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
    A) DIAGRAMA DE CUERPO LIBRE (DCL/DCA): Si hay fuerzas involucradas, dibuja el diagrama.
       Primera linea del bloque: # GRAFICO_DCL
       Usa fig, ax = plt.subplots(figsize=(10, 8)) con ax.set_aspect('equal').
-      El cuerpo debe ser un rectangulo o punto en el CENTRO del grafico.
-      TODAS las flechas de fuerza deben partir del centro del cuerpo.
-      TODAS las flechas deben tener la MISMA longitud visual (escalar a ~3 unidades).
-      Colores: rojo=peso, azul=normal, verde=fuerza aplicada, naranja=friccion.
-      Etiquetas grandes (fontsize=14) al lado de la punta de cada flecha.
-      Incluir leyenda con ax.legend().
-      Usar SOLO ax.annotate con arrowprops=dict(arrowstyle='->', color=COLOR, lw=2.5).
-      NUNCA uses head_width, head_length ni width en arrowprops.
-      Incluir ejes coordenados (x', y' si es plano inclinado) con flechas grises.
-      El grafico debe tener limites simetricos y centrados en el cuerpo.
+
+      REGLAS FISICAS OBLIGATORIAS PARA EL DCL:
+      - El cuerpo (masa) debe ser un punto GRANDE o rectangulo en su posicion real.
+      - TODAS las flechas de fuerza PARTEN DESDE EL CENTRO DEL CUERPO (la masa).
+      - El PESO (P = mg) es SIEMPRE una flecha VERTICAL HACIA ABAJO desde la masa.
+        No importa si el sistema esta inclinado, rotado o es un pendulo: el peso
+        SIEMPRE apunta en la direccion -y (hacia el suelo). Color: ROJO.
+      - La TENSION de una cuerda va DESDE la masa HACIA el punto de sujecion,
+        a lo largo de la cuerda. Color: AZUL.
+      - La NORMAL es SIEMPRE perpendicular a la superficie de contacto,
+        apuntando HACIA AFUERA de la superficie. Color: AZUL.
+      - La FRICCION es SIEMPRE tangente a la superficie, opuesta al movimiento. Color: NARANJA.
+      - Fuerzas aplicadas externas: Color VERDE.
+      - Fuerza de arrastre/resistencia del aire: Color NARANJA, opuesta a la velocidad.
+        SOLO incluirla si el problema EXPLICITAMENTE menciona resistencia del aire.
+
+      REGLAS DE DIBUJO:
+      - TODAS las flechas deben tener la MISMA longitud visual (~3 unidades).
+      - Etiquetas grandes (fontsize=14) al lado de la punta de cada flecha.
+      - Usar SOLO ax.annotate con arrowprops=dict(arrowstyle='->', color=COLOR, lw=2.5).
+      - NUNCA uses head_width, head_length ni width en arrowprops.
+      - Incluir ejes coordenados con flechas grises.
+      - El grafico debe tener limites simetricos y centrados en el cuerpo.
+      - Incluir leyenda con ax.legend().
+      - Si el problema tiene geometria (pendulo, plano inclinado), dibujar
+        tambien la estructura (cuerda, superficie) en color negro/gris.
+
+      PARA PENDULOS ESPECIFICAMENTE:
+      - Dibujar el punto de suspension (pivote) como un punto gris arriba.
+      - Dibujar la cuerda como una linea negra desde el pivote hasta la masa.
+      - La masa esta en el extremo inferior de la cuerda.
+      - El peso va RECTO HACIA ABAJO desde la masa (no a lo largo de la cuerda).
+      - La tension va DESDE LA MASA HACIA EL PIVOTE (a lo largo de la cuerda).
+
+      PARA PLANOS INCLINADOS ESPECIFICAMENTE:
+      - Dibujar la superficie inclinada como una linea GRIS GRUESA (lw=3).
+      - La masa se dibuja SOBRE la superficie, NO flotando en el aire.
+      - Normal: PERPENDICULAR a la superficie inclinada, apuntando HACIA AFUERA de la superficie.
+        Si el plano tiene angulo alpha con la horizontal, la Normal forma angulo alpha con la vertical.
+      - Friccion (si existe): TANGENTE a la superficie, OPUESTA al movimiento o tendencia de movimiento.
+      - Peso: SIEMPRE VERTICAL HACIA ABAJO, sin importar la inclinacion del plano.
+      - Si hay cuerda: dibujar la cuerda y la tension va A LO LARGO de ella hacia el punto de sujecion.
+      - NO mezclar estas reglas con las de pendulos ni conos.
+
+      PARA SUPERFICIES CONICAS ESPECIFICAMENTE:
+      - Dibujar el PERFIL del cono (las dos paredes inclinadas) como lineas GRISES gruesas (lw=3)
+        formando una V invertida o V segun la orientacion del cono.
+      - La masa se dibuja SOBRE la pared del cono, NO en el centro ni en el vertice.
+      - Normal: PERPENDICULAR a la PARED CONICA, apuntando hacia el INTERIOR del cono (hacia el eje).
+        En un cono con semiangulo alpha, la Normal forma angulo alpha con la horizontal.
+      - Tension (si hay cuerda que pasa por el vertice): va DESDE LA MASA HACIA EL VERTICE del cono,
+        A LO LARGO de la cuerda. NO apunta hacia arriba ni al aire.
+      - Peso: SIEMPRE VERTICAL HACIA ABAJO desde la masa.
+      - Si hay una pesa colgando del otro extremo de la cuerda, hacer DOS subplots separados:
+        uno para el objeto sobre el cono y otro para la pesa colgante (con su propio DCL).
+      - NO mezclar estas reglas con las de pendulos ni planos inclinados.
 
    B) VECTORES Y VERSORES - TODO EN UN SOLO GRAFICO:
       En ejercicios de cinematica, genera UN UNICO bloque de codigo Python que dibuje
