@@ -251,10 +251,34 @@ def _sanitizar_codigo_matplotlib(codigo):
     codigo = re.sub(r'arrowprops\s*=\s*dict\(([^)]*)\)', limpiar_arrowprops, codigo)
 
     # Si Gemini uso plt.quiver, intentar convertir a plt.annotate
-    # (quiver da problemas de escala frecuentemente)
-    # No hacemos conversion automatica porque es complejo, pero si advertimos
     if 'plt.quiver' in codigo or '.quiver(' in codigo:
         print("[WARN] El codigo usa plt.quiver que puede dar problemas de escala.")
+
+    # Fix: comillas conflictivas en strings.
+    # Gemini genera cosas como label='Fricción (f'_e)' donde f' rompe el string.
+    # Solucion: buscar parametros con comillas simples problematicas y usar dobles.
+    # Detectamos: label='...', set_title('...'), ax.text(..., '...') donde el
+    # contenido entre comillas tiene apostrofes o primas (f', N', etc.)
+    lineas = codigo.split('\n')
+    resultado = []
+    for linea in lineas:
+        # Contar comillas simples que NO sean parte de r'...' (raw strings)
+        # Si hay un numero impar de comillas simples, hay un conflicto
+        if "r'" not in linea and "r\"" not in linea:
+            # Contar ' fuera de strings dobles
+            singles = linea.count("'")
+            if singles > 0 and singles % 2 != 0:
+                # Numero impar de comillas simples = string roto
+                # Reemplazar comillas simples en labels/text por dobles
+                # Patron: convertir 'texto con ' adentro' a "texto con ' adentro"
+                linea = re.sub(
+                    r"(label\s*=\s*|set_title\s*\(\s*|,\s*r?)'(.+?)'(\s*[,\)\n])",
+                    lambda m: f'{m.group(1)}"{m.group(2)}"{m.group(3)}',
+                    linea
+                )
+
+        resultado.append(linea)
+    codigo = '\n'.join(resultado)
 
     return codigo
 
@@ -366,11 +390,63 @@ def _markdown_a_html(texto):
     texto = re.sub(r'```[Pp]ython\s*\n(.*?)```', reemplazo_codigo, texto, flags=re.DOTALL)
     texto = re.sub(r'```\w*\s*\n(.*?)```', reemplazo_codigo, texto, flags=re.DOTALL)
 
+    # 1b. Safety net: limpiar codigo Python suelto que Gemini mando sin ``` markers.
+    #     Detecta lineas que contienen codigo matplotlib/numpy tipico y las elimina.
+    def es_codigo_python(linea):
+        s = linea.strip()
+        patrones_codigo = [
+            r'^import\s+', r'^from\s+\w+\s+import', r'^fig\s*[,=]', r'^ax\d*[\.\s=]',
+            r'^plt\.', r'^np\.', r'^body_\w+\s*=', r'^arrow_', r'^rect',
+            r'\.annotate\(', r'\.add_patch\(', r'\.set_aspect\(', r'\.set_xlim\(',
+            r'\.set_ylim\(', r'\.set_title\(', r'\.legend\(', r'\.plot\(',
+            r'\.text\(', r'arrowprops\s*=', r'arrowstyle\s*=', r'plt\.show\(\)',
+            r'\.set_xticks\(', r'\.set_yticks\(', r'plt\.Line2D\(',
+            r'plt\.Rectangle\(', r'\.grid\(', r'fontsize\s*=\s*\d',
+            r'color\s*=\s*[\'"]', r'lw\s*=\s*\d', r'zorder\s*=\s*\d',
+        ]
+        return any(re.search(p, s) for p in patrones_codigo)
+
+    lineas_texto = texto.split('\n')
+    lineas_limpias = []
+    bloque_codigo_suelto = False
+    for linea in lineas_texto:
+        s = linea.strip()
+        # Detectar inicio de codigo suelto
+        if s.startswith('# GRAFICO_'):
+            bloque_codigo_suelto = True
+            # Determinar tipo para el placeholder
+            if 'TIEMPO' in s:
+                lineas_limpias.append('\n[GRAFICO:Grafico de magnitudes vs tiempo]\n')
+            elif 'VECTORES' in s:
+                lineas_limpias.append('\n[GRAFICO:Diagrama de vectores y versores]\n')
+            elif 'DCL' in s:
+                lineas_limpias.append('\n[GRAFICO:Diagrama de cuerpo libre]\n')
+            continue
+        # Si estamos en un bloque de codigo suelto, seguir saltando lineas de codigo
+        if bloque_codigo_suelto:
+            if es_codigo_python(linea) or s == '' or s.startswith('#'):
+                continue
+            else:
+                # Ya no es codigo, volver a texto normal
+                bloque_codigo_suelto = False
+                lineas_limpias.append(linea)
+        else:
+            # Linea solitaria de codigo (plt.show() suelto, imports sueltos, etc.)
+            if s in ('plt.show()', '') or re.match(r'^import\s+matplotlib', s) or re.match(r'^import\s+numpy', s):
+                continue
+            lineas_limpias.append(linea)
+
+    texto = '\n'.join(lineas_limpias)
+
     # 2. Convertir "falso display" a inline
     #    Gemini usa $$formula$$ (display/centrado) para formulas que deberian ser
-    #    inline $formula$ cuando estan dentro de una oracion. Detectamos esto
-    #    mirando las lineas anterior y siguiente: si hay texto normal alrededor,
-    #    la formula deberia ser inline.
+    #    inline $formula$ cuando estan entre texto. Dos estrategias:
+    #
+    #    A) Formulas CORTAS (menos de 30 chars): son variables/simbolos como $$N_B$$,
+    #       $$f'_e$$, $$P_A$$ — estas NUNCA deberian ser display. Convertir siempre.
+    #
+    #    B) Formulas LARGAS en contexto de texto: detectar por linea anterior/siguiente.
+
     lineas_pre = texto.split('\n')
     for i, linea in enumerate(lineas_pre):
         stripped = linea.strip()
@@ -378,23 +454,26 @@ def _markdown_a_html(texto):
         if not re.match(r'^\$\$[^$]+\$\$$', stripped):
             continue
 
-        # Buscar linea anterior no vacia
+        inner = stripped[2:-2]
+
+        # A) Formulas cortas: SIEMPRE inline (son variables, no ecuaciones)
+        if len(inner) < 30:
+            lineas_pre[i] = f'${inner}$'
+            continue
+
+        # B) Formulas largas: solo convertir si estan entre texto
         prev = ""
         for j in range(i - 1, -1, -1):
             if lineas_pre[j].strip():
                 prev = lineas_pre[j].strip()
                 break
 
-        # Buscar linea siguiente no vacia
         next_l = ""
         for j in range(i + 1, len(lineas_pre)):
             if lineas_pre[j].strip():
                 next_l = lineas_pre[j].strip()
                 break
 
-        # Es "falso display" si:
-        # - La linea anterior es texto normal (no termina en : ni es heading/vacia)
-        # - O la linea siguiente empieza con minuscula, coma, punto, parentesis, etc.
         prev_es_texto = (prev
                          and not prev.endswith(':')
                          and not prev.startswith('#')
@@ -406,8 +485,6 @@ def _markdown_a_html(texto):
                               or next_l[0] in ',.;:)]}'))
 
         if prev_es_texto or next_continua:
-            # Convertir $$...$$ a $...$ (inline)
-            inner = stripped[2:-2]
             lineas_pre[i] = f'${inner}$'
 
     texto = '\n'.join(lineas_pre)
@@ -819,7 +896,13 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
 
    A) DIAGRAMA DE CUERPO LIBRE (DCL/DCA): Si hay fuerzas involucradas, dibuja el diagrama.
       Primera linea del bloque: # GRAFICO_DCL
-      Usa fig, ax = plt.subplots(figsize=(10, 8)) con ax.set_aspect('equal').
+      REGLA CRITICA: SIEMPRE genera UN SOLO bloque ```python con # GRAFICO_DCL.
+      Si hay MULTIPLES cuerpos (caja A y plataforma B, auto y pesa, etc.),
+      usa plt.subplots(1, N) para poner todos los DCL en UNA SOLA figura con subplots.
+      NUNCA generes dos bloques ```python separados con # GRAFICO_DCL.
+      Ejemplo para 2 cuerpos: fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+      Ejemplo para 3 cuerpos: fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(22, 8))
+      Cada subplot tiene su propio titulo, fuerzas y leyenda.
 
       REGLAS FISICAS OBLIGATORIAS PARA EL DCL:
       - El cuerpo (masa) debe ser un punto GRANDE o rectangulo en su posicion real.
@@ -1015,8 +1098,13 @@ RESPONDE DE FORMA CLARA Y NO TE SALGAS DE TU ROL.
 
         return True, mensaje
 
-    def preguntar(self, pregunta):
-        respuesta = self.chat.send_message(pregunta)
+    def preguntar(self, pregunta, imagen_path=None):
+        if imagen_path:
+            imagen = genai.upload_file(imagen_path)
+            contenido = [imagen, pregunta]
+        else:
+            contenido = pregunta
+        respuesta = self.chat.send_message(contenido)
         return respuesta.text
 
     def evaluar(self):
@@ -1043,6 +1131,7 @@ class AppFisica(ctk.CTk):
         self.asistente = None
         self.formula_renderer = FormulaRenderer()
         self._last_response = ""
+        self.imagen_adjunta = None  # ruta de imagen adjunta para enviar con la consulta
         self._crear_interfaz()
         self._inicializar_asistente()
 
@@ -1105,29 +1194,55 @@ class AppFisica(ctk.CTk):
         self.boton_limpiar = ctk.CTkButton(left, text="Limpiar consulta", command=self.limpiar_entrada)
         self.boton_limpiar.grid(row=3, column=0, padx=16, pady=(0, 10), sticky="ew")
 
+        # --- Adjuntar imagen ---
+        frame_imagen = ctk.CTkFrame(left, fg_color="transparent")
+        frame_imagen.grid(row=4, column=0, padx=16, pady=(0, 10), sticky="ew")
+        frame_imagen.grid_columnconfigure(0, weight=1)
+
+        self.boton_adjuntar = ctk.CTkButton(
+            frame_imagen, text="Adjuntar imagen de ejercicio",
+            command=self._adjuntar_imagen,
+            fg_color="#b45309", hover_color="#d97706",
+        )
+        self.boton_adjuntar.grid(row=0, column=0, padx=(0, 6), pady=0, sticky="ew")
+
+        self.boton_quitar_imagen = ctk.CTkButton(
+            frame_imagen, text="X", width=36,
+            command=self._quitar_imagen,
+            fg_color="#7f1d1d", hover_color="#991b1b",
+        )
+        self.boton_quitar_imagen.grid(row=0, column=1, padx=0, pady=0)
+        self.boton_quitar_imagen.grid_remove()  # oculto hasta que haya imagen
+
+        self.label_imagen = ctk.CTkLabel(
+            left, text="", text_color="#d97706",
+            font=ctk.CTkFont(size=12),
+        )
+        self.label_imagen.grid(row=5, column=0, padx=16, pady=(0, 6), sticky="w")
+
         self.boton_cargar = ctk.CTkButton(left, text="Cargar PDFs de apuntes_catedra", command=self.cargar_pdfs)
-        self.boton_cargar.grid(row=4, column=0, padx=16, pady=(0, 10), sticky="ew")
+        self.boton_cargar.grid(row=6, column=0, padx=16, pady=(0, 10), sticky="ew")
 
         self.boton_grafico = ctk.CTkButton(
             left, text="Graficar tiempo / DCL",
             command=self.ejecutar_grafico_detectado,
             fg_color="#1a5276", hover_color="#2980b9",
         )
-        self.boton_grafico.grid(row=5, column=0, padx=16, pady=(0, 10), sticky="ew")
+        self.boton_grafico.grid(row=7, column=0, padx=16, pady=(0, 10), sticky="ew")
 
         self.boton_vectores = ctk.CTkButton(
             left, text="Graficar vectores / versores",
             command=self.ejecutar_vectores_detectado,
             fg_color="#6c3483", hover_color="#8e44ad",
         )
-        self.boton_vectores.grid(row=6, column=0, padx=16, pady=(0, 10), sticky="ew")
+        self.boton_vectores.grid(row=8, column=0, padx=16, pady=(0, 10), sticky="ew")
 
         self.boton_navegador = ctk.CTkButton(
             left, text="Ver formulas en navegador",
             command=self._abrir_en_navegador,
             fg_color="#2d6a4f", hover_color="#40916c",
         )
-        self.boton_navegador.grid(row=7, column=0, padx=16, pady=(0, 16), sticky="ew")
+        self.boton_navegador.grid(row=9, column=0, padx=16, pady=(0, 16), sticky="ew")
 
         # Panel derecho
         right = ctk.CTkFrame(main, corner_radius=16)
@@ -1202,9 +1317,27 @@ class AppFisica(ctk.CTk):
         self.boton_vectores.configure(state=estado)
         self.boton_limpiar.configure(state=estado)
         self.boton_navegador.configure(state=estado)
+        self.boton_adjuntar.configure(state=estado)
+
+    def _adjuntar_imagen(self):
+        ruta = filedialog.askopenfilename(
+            title="Seleccionar imagen del ejercicio",
+            filetypes=[("Imagenes", "*.png *.jpg *.jpeg *.bmp *.webp")],
+        )
+        if ruta:
+            self.imagen_adjunta = ruta
+            nombre = os.path.basename(ruta)
+            self.label_imagen.configure(text=f"Adjunta: {nombre}")
+            self.boton_quitar_imagen.grid()  # mostrar boton X
+
+    def _quitar_imagen(self):
+        self.imagen_adjunta = None
+        self.label_imagen.configure(text="")
+        self.boton_quitar_imagen.grid_remove()  # ocultar boton X
 
     def limpiar_entrada(self):
         self.texto_entrada.delete("1.0", "end")
+        self._quitar_imagen()  # tambien limpia la imagen adjunta
 
     def enviar_consulta(self):
         pregunta = self.texto_entrada.get("1.0", "end").strip()
@@ -1216,13 +1349,20 @@ class AppFisica(ctk.CTk):
             messagebox.showwarning("Atencion", "El asistente todavia se esta inicializando.")
             return
 
-        self._append_salida(f"\n{'='*50}\n[Tu]\n{pregunta}\n\n")
+        # Capturar imagen adjunta antes de lanzar el hilo
+        imagen_para_enviar = self.imagen_adjunta
+        if imagen_para_enviar:
+            nombre_img = os.path.basename(imagen_para_enviar)
+            self._append_salida(f"\n{'='*50}\n[Tu]\n{pregunta}\n(Imagen adjunta: {nombre_img})\n\n")
+        else:
+            self._append_salida(f"\n{'='*50}\n[Tu]\n{pregunta}\n\n")
+        self._quitar_imagen()  # limpiar de la UI despues de capturar
         self._set_botones_habilitados(False)
         self._cambiar_estado("Analizando consulta...")
 
         def tarea():
             try:
-                respuesta = self.asistente.preguntar(pregunta)
+                respuesta = self.asistente.preguntar(pregunta, imagen_path=imagen_para_enviar)
                 self._last_response = respuesta
 
                 # Detectar que graficos hay disponibles
@@ -1459,7 +1599,11 @@ class AppFisica(ctk.CTk):
             f"Se detectaron {len(bloques)} grafico(s) de tiempo/DCL. Deseas ejecutarlos?",
         )
         if confirmar:
-            self._ejecutar_bloques(bloques, "grafico(s) de tiempo/DCL")
+            threading.Thread(
+                target=self._ejecutar_bloques,
+                args=(bloques, "grafico(s) de tiempo/DCL"),
+                daemon=True,
+            ).start()
 
     def ejecutar_vectores_detectado(self):
         """Ejecuta el diagrama de vectores y versores en todas las coordenadas."""
@@ -1501,7 +1645,11 @@ class AppFisica(ctk.CTk):
             f"Se detecto {len(bloques)} diagrama(s) de vectores/versores. Deseas ejecutarlo?",
         )
         if confirmar:
-            self._ejecutar_bloques(bloques, "diagrama(s) de vectores")
+            threading.Thread(
+                target=self._ejecutar_bloques,
+                args=(bloques, "diagrama(s) de vectores"),
+                daemon=True,
+            ).start()
 
     def _abrir_en_navegador(self):
         if not self._last_response:
