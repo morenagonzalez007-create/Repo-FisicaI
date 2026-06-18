@@ -280,6 +280,27 @@ def _sanitizar_codigo_matplotlib(codigo):
         resultado.append(linea)
     codigo = '\n'.join(resultado)
 
+    # Fix: plt.transforms no existe, debe ser matplotlib.transforms
+    if 'plt.transforms' in codigo:
+        if 'import matplotlib' not in codigo and 'import matplotlib.transforms' not in codigo:
+            codigo = 'import matplotlib.transforms\n' + codigo
+        codigo = codigo.replace('plt.transforms', 'matplotlib.transforms')
+
+    # Fix: ax.arc() no existe, usar patches.Arc y add_patch
+    if '.arc(' in codigo:
+        lineas_arc = codigo.split('\n')
+        resultado_arc = []
+        for linea in lineas_arc:
+            m = re.match(r'^(\s*)(\w+)\.arc\(([^)]+)\)', linea)
+            if m:
+                indent = m.group(1)
+                ax_name = m.group(2)
+                args = m.group(3)
+                resultado_arc.append(f'{indent}# arc removido - no soportado directamente')
+            else:
+                resultado_arc.append(linea)
+        codigo = '\n'.join(resultado_arc)
+
     return codigo
 
 
@@ -403,6 +424,11 @@ def _markdown_a_html(texto):
             r'\.set_xticks\(', r'\.set_yticks\(', r'plt\.Line2D\(',
             r'plt\.Rectangle\(', r'\.grid\(', r'fontsize\s*=\s*\d',
             r'color\s*=\s*[\'"]', r'lw\s*=\s*\d', r'zorder\s*=\s*\d',
+            r'^alpha_\w+\s*=', r'^center_\w+\s*=', r'^block_\w+\s*=',
+            r'^\w+_len\s*=', r'^\w+_vec_\w+\s*=', r'^patches\.',
+            r'\.subplots\(', r'plt\.tight_layout', r'plt\.subplots\(',
+            r'^incline_', r'^normal_', r'^tension_', r'^friction_',
+            r'^Mg_', r'^mg_',
         ]
         return any(re.search(p, s) for p in patrones_codigo)
 
@@ -411,10 +437,9 @@ def _markdown_a_html(texto):
     bloque_codigo_suelto = False
     for linea in lineas_texto:
         s = linea.strip()
-        # Detectar inicio de codigo suelto
+        # Detectar inicio de codigo suelto con marcador
         if s.startswith('# GRAFICO_'):
             bloque_codigo_suelto = True
-            # Determinar tipo para el placeholder
             if 'TIEMPO' in s:
                 lineas_limpias.append('\n[GRAFICO:Grafico de magnitudes vs tiempo]\n')
             elif 'VECTORES' in s:
@@ -422,46 +447,59 @@ def _markdown_a_html(texto):
             elif 'DCL' in s:
                 lineas_limpias.append('\n[GRAFICO:Diagrama de cuerpo libre]\n')
             continue
+        # Detectar inicio de codigo suelto SIN marcador (Gemini omitio # GRAFICO_)
+        if not bloque_codigo_suelto and es_codigo_python(linea):
+            bloque_codigo_suelto = True
+            lineas_limpias.append('\n[GRAFICO:Diagrama de cuerpo libre]\n')
+            continue
         # Si estamos en un bloque de codigo suelto, seguir saltando lineas de codigo
         if bloque_codigo_suelto:
             if es_codigo_python(linea) or s == '' or s.startswith('#'):
                 continue
             else:
-                # Ya no es codigo, volver a texto normal
                 bloque_codigo_suelto = False
                 lineas_limpias.append(linea)
         else:
-            # Linea solitaria de codigo (plt.show() suelto, imports sueltos, etc.)
             if s in ('plt.show()', '') or re.match(r'^import\s+matplotlib', s) or re.match(r'^import\s+numpy', s):
                 continue
             lineas_limpias.append(linea)
 
     texto = '\n'.join(lineas_limpias)
 
-    # 2. Convertir "falso display" a inline
-    #    Gemini usa $$formula$$ (display/centrado) para formulas que deberian ser
-    #    inline $formula$ cuando estan entre texto. Dos estrategias:
-    #
-    #    A) Formulas CORTAS (menos de 30 chars): son variables/simbolos como $$N_B$$,
-    #       $$f'_e$$, $$P_A$$ — estas NUNCA deberian ser display. Convertir siempre.
-    #
-    #    B) Formulas LARGAS en contexto de texto: detectar por linea anterior/siguiente.
+    # 1c. Convertir titulos de PASO en bold a headings markdown
+    #     Gemini a veces escribe **PASO 1 - ...** en vez de ## PASO 1 - ...
+    lineas_fix_paso = texto.split('\n')
+    for i, linea in enumerate(lineas_fix_paso):
+        s = linea.strip()
+        if re.match(r'^\*\*\s*(PASO\s+\d|ANTES DE EMPEZAR|CASOS ESPECIALES)', s, re.IGNORECASE):
+            contenido = re.sub(r'^\*\*\s*', '', s)
+            contenido = re.sub(r'\s*\*\*\s*$', '', contenido)
+            lineas_fix_paso[i] = f'## {contenido}'
+        elif re.match(r'^\*\*(Metodolog[ií]a|Lectura del Enunciado)', s, re.IGNORECASE):
+            contenido = re.sub(r'^\*\*\s*', '', s)
+            contenido = re.sub(r'\s*\*\*\s*$', '', contenido)
+            lineas_fix_paso[i] = f'## {contenido}'
+    texto = '\n'.join(lineas_fix_paso)
 
+    # 2. Convertir "falso display" a inline
+    #    Gemini usa $$formula$$ para formulas que deberian ser inline.
+    #    2A) Formulas cortas embebidas en texto: $$T$$, $$m$$, $$N_m$$ -> $T$, $m$, $N_m$
+    def convertir_display_corto(match):
+        inner = match.group(1)
+        if len(inner) < 30:
+            return '$' + inner + '$'
+        return match.group(0)
+    texto = re.sub(r'[$][$]([^$]+?)[$][$]', convertir_display_corto, texto)
+
+    # 2B) Formulas largas solas en su linea: convertir si estan entre texto
     lineas_pre = texto.split('\n')
     for i, linea in enumerate(lineas_pre):
         stripped = linea.strip()
-        # Solo procesar lineas que son UNICAMENTE una formula $$...$$
-        if not re.match(r'^\$\$[^$]+\$\$$', stripped):
+        if not re.match(r'^[$][$][^$]+[$][$]$', stripped):
             continue
 
         inner = stripped[2:-2]
 
-        # A) Formulas cortas: SIEMPRE inline (son variables, no ecuaciones)
-        if len(inner) < 30:
-            lineas_pre[i] = f'${inner}$'
-            continue
-
-        # B) Formulas largas: solo convertir si estan entre texto
         prev = ""
         for j in range(i - 1, -1, -1):
             if lineas_pre[j].strip():
@@ -488,6 +526,45 @@ def _markdown_a_html(texto):
             lineas_pre[i] = f'${inner}$'
 
     texto = '\n'.join(lineas_pre)
+
+    # 2b. Pegar formulas inline sueltas con el texto circundante.
+    lineas_raw = texto.split('\n')
+    merged = []
+    for i_raw, linea in enumerate(lineas_raw):
+        s = linea.strip()
+        es_formula_inline = bool(re.match(r'^\$[^$]+\$$', s) and not s.startswith('$$'))
+        es_fragmento_corto = (0 < len(s) <= 4
+                              and not s.startswith('#')
+                              and not s.startswith('[')
+                              and not s.startswith('*')
+                              and not s.startswith('-')
+                              and not s.startswith('='))
+
+        if (es_formula_inline or es_fragmento_corto) and merged:
+            idx = len(merged) - 1
+            while idx >= 0 and not merged[idx].strip():
+                idx -= 1
+            if idx >= 0:
+                merged = merged[:idx + 1]
+                merged[idx] = merged[idx].rstrip() + ' ' + s
+                continue
+        if not s and merged:
+            next_nonblank = ""
+            for j in range(i_raw + 1, len(lineas_raw)):
+                if lineas_raw[j].strip():
+                    next_nonblank = lineas_raw[j].strip()
+                    break
+            es_next_inline = bool(re.match(r'^\$[^$]+\$$', next_nonblank) and not next_nonblank.startswith('$$'))
+            es_next_frag = (0 < len(next_nonblank) <= 4
+                            and not next_nonblank.startswith('#')
+                            and not next_nonblank.startswith('-')
+                            and not next_nonblank.startswith('*')
+                            and not next_nonblank.startswith('['))
+            if es_next_inline or es_next_frag:
+                continue
+
+        merged.append(linea)
+    texto = '\n'.join(merged)
 
     # 3. Proteger formulas LaTeX (ahora con display/inline correctos)
     #    Usar caracteres Unicode PUA (Private Use Area) como placeholders
@@ -543,14 +620,84 @@ def _markdown_a_html(texto):
     colapsado = []
     for linea in lineas:
         if es_linea_especial(linea):
-            # Mantener en su propia linea
             colapsado.append(linea)
         elif colapsado and not es_linea_especial(colapsado[-1]):
-            # Unir con la linea anterior (agregar espacio)
             colapsado[-1] = colapsado[-1].rstrip() + ' ' + linea.strip()
         else:
             colapsado.append(linea)
+
+    # 4b. Segundo pase: absorber lineas huerfanas muy cortas (como ":", "y", ")", ",")
+    #     que quedaron solas entre lineas vacias. Pegarlas a la linea NO vacia mas cercana.
+    final = []
+    for linea in colapsado:
+        stripped = linea.strip()
+        # Es huerfana: muy corta (1-3 chars), no es heading, no es placeholder, no esta vacia
+        es_huerfana = (0 < len(stripped) <= 3
+                       and not stripped.startswith('#')
+                       and not stripped.startswith('[')
+                       and not re.match(rf'^{re.escape(PH_START)}', stripped))
+        if es_huerfana and final:
+            # Buscar la ultima linea no vacia hacia atras para pegarla
+            idx = len(final) - 1
+            while idx >= 0 and not final[idx].strip():
+                idx -= 1
+            if idx >= 0:
+                final[idx] = final[idx].rstrip() + ' ' + stripped
+                continue
+        final.append(linea)
+    colapsado = final
+
+    # 4c. Tercer pase: absorber lineas vacias entre una linea de texto y un placeholder
+    #     inline (formula corta). Evita que formulas inline queden en parrafo separado.
+    final2 = []
+    for i, linea in enumerate(colapsado):
+        stripped = linea.strip()
+        # Si es linea vacia, ver si esta entre texto y una formula inline
+        if not stripped and i > 0 and i < len(colapsado) - 1:
+            prev_s = colapsado[i - 1].strip() if i > 0 else ""
+            next_s = colapsado[i + 1].strip() if i < len(colapsado) - 1 else ""
+            # Chequear si la siguiente es un placeholder de formula inline
+            es_ph_inline = (re.match(rf'^{re.escape(PH_START)}F(\d+){re.escape(PH_END)}$', next_s)
+                            and not es_linea_display(colapsado[i + 1]))
+            # Si la anterior es texto normal y la siguiente es formula inline, saltar la vacia
+            if prev_s and not es_linea_especial(colapsado[i - 1]) and es_ph_inline:
+                continue
+            # Si la anterior es formula inline y la siguiente es texto normal
+            prev_es_ph_inline = (re.match(rf'^{re.escape(PH_START)}F(\d+){re.escape(PH_END)}$', prev_s)
+                                 and not es_linea_display(colapsado[i - 1]))
+            if prev_es_ph_inline and next_s and not es_linea_especial(colapsado[i + 1]):
+                continue
+        final2.append(linea)
+    colapsado = final2
+
     texto = '\n'.join(colapsado)
+
+    # 4d. Asegurar linea vacia ANTES y DESPUES de headings y separadores
+    lineas_final = texto.split('\n')
+    con_separacion = []
+    for i, linea in enumerate(lineas_final):
+        s = linea.strip()
+        # Si la linea contiene un heading pegado a texto (## PASO 1 Texto aqui...)
+        # separar el heading del texto
+        h_inline = re.match(r'^(#{1,4}\s+[^#\n]+?)(\s{2,}|\.\s+)(.+)$', s)
+        if h_inline:
+            heading_part = h_inline.group(1).strip()
+            rest_part = h_inline.group(3).strip()
+            if con_separacion and con_separacion[-1].strip():
+                con_separacion.append('')
+            con_separacion.append(heading_part)
+            con_separacion.append('')
+            con_separacion.append(rest_part)
+            continue
+
+        if (s.startswith('#') or s.startswith('---')) and i > 0:
+            if con_separacion and con_separacion[-1].strip():
+                con_separacion.append('')
+        con_separacion.append(linea)
+        # Linea vacia DESPUES de headings
+        if s.startswith('#') and not s.startswith('#GRAFICO'):
+            con_separacion.append('')
+    texto = '\n'.join(con_separacion)
 
     # 5. Escapar HTML
     texto = texto.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
@@ -578,7 +725,11 @@ def _markdown_a_html(texto):
         h_match = re.match(r'^(#{1,4})\s+(.+)$', bloque)
         if h_match:
             nivel = len(h_match.group(1))
-            html_bloques.append(f'<h{nivel}>{h_match.group(2)}</h{nivel}>')
+            texto_h = h_match.group(2)
+            if any(kw in texto_h.upper() for kw in ['PASO ', 'ANTES DE EMPEZAR', 'CASOS ESPECIALES']):
+                html_bloques.append(f'<h{nivel} class="paso-heading">{texto_h}</h{nivel}>')
+            else:
+                html_bloques.append(f'<h{nivel}>{texto_h}</h{nivel}>')
             continue
 
         # Linea horizontal
@@ -601,6 +752,8 @@ def _markdown_a_html(texto):
                 # Quitar marcador de lista
                 l = re.sub(r'^\s*[\*\-]\s+', '', l)
                 l = re.sub(r'^\s*\d+\.\s+', '', l)
+                l = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', l)
+                l = re.sub(r'\*([^\*]+?)\*', r'<em>\1</em>', l)
                 items.append(f'<li>{l}</li>')
             html_bloques.append('<ul>' + ''.join(items) + '</ul>')
             continue
@@ -714,7 +867,8 @@ MathJax = {{
 <style>
 body {{ font-family: 'Segoe UI', Tahoma, sans-serif; max-width: 900px; margin: 40px auto;
        padding: 24px; background: #1a1a2e; color: #e0e0e0; line-height: 1.8; font-size: 16px; }}
-h1,h2,h3,h4 {{ color: #4ea8de; margin-top: 1.2em; }}
+h1,h2,h3,h4 {{ color: #4ea8de; margin-top: 0.8em; margin-bottom: 0.3em; }}
+.paso-heading {{ color: #e67e22; margin-top: 1.2em; margin-bottom: 0.4em; }}
 p {{ margin: 4px 0; }}
 strong {{ color: #7ec8e3; }}
 em {{ color: #c4c4c4; }}
@@ -807,11 +961,158 @@ Tu objetivo es resolver, explicar y analizar problemas de fisica enfocados en la
 
 REGLAS ESTRICTAS DE COMPORTAMIENTO:
 1. USO DE RECURSOS: Inicialmente, tu conocimiento DEBE limitarse a los documentos, libros, apuntes y ejercicios resueltos proporcionados por el usuario. No debes inventar datos ni usar busquedas web externas por ahora. Aplica el conocimiento de esos textos para resolver las dudas.
-2. ESTRUCTURA DE RESPUESTA PARA EJERCICIOS NUMERICOS:
-   - Paso 1: Analisis Teorico y Deteccion de Datos. Explica claramente la situacion fisica y los datos disponibles.
-   - Paso 2: Leyes y Formulas. Menciona (si aplica) las fuerzas actuantes y las leyes o teoremas de conservacion (energia, momento lineal/angular) que aplican al caso.
-   - Paso 3: Resolucion paso a paso explicando el por que de cada operacion matematica.
-   - Paso 4: Justificacion del resultado y deteccion de posibles errores conceptuales o trampas comunes de los estudiantes en la formulacion de este tipo de ejercicios.
+2. METODOLOGIA DE 5 PASOS PARA DINAMICA (Catedra Gasaneo - UNS):
+   INSTRUCCION GENERAL: NO seguir el orden de los incisos ciegamente. Los incisos a veces piden
+   resultados parciales que son incognitas que salen TODAS juntas del mismo sistema de ecuaciones.
+   La metodologia se aplica primero de corrido (pasos 1 a 5), y despues se responden los incisos
+   con los resultados obtenidos.
+   EXCEPCION: si el problema tiene dos situaciones fisicas distintas (ej: "primero sube, despues
+   la cuerda se corta"), cada situacion se resuelve con sus propios 5 pasos por separado.
+
+   ANTES DE EMPEZAR: Leer todo el enunciado. Identificar:
+   - Cuantos cuerpos hay y si hay vinculos entre ellos (cuerdas, contacto, resortes)
+   - Si hay rozamiento (estatico o dinamico)
+   - Si el movimiento es lineal, circular o combinado
+   - Que sistema de coordenadas conviene (cartesiano para planos inclinados y movimiento recto,
+     polares para pendulos y movimiento circular, cilindricas para circular en 3D)
+
+   PASO 1 - DCL (Diagrama de Cuerpo Libre):
+   Objetivo: dibujar TODAS las fuerzas que actuan sobre CADA cuerpo.
+   - Declarar el sistema de referencia (SR): "SR inercial, fijo al suelo".
+   - Declarar el sistema de coordenadas (SC): especificar ejes, origen, sentido positivo.
+     Ej: "SC cartesiano (x, y) con origen en el punto de contacto, x positivo a la derecha"
+     Ej: "SC polares (e_r, e_theta) con origen en O, e_r radial hacia afuera"
+   - Aislar cada cuerpo: dibujarlo como punto o bloque, SIN los otros cuerpos.
+   - Dibujar TODAS las fuerzas sobre ese cuerpo. Lista de fuerzas posibles:
+     * Peso (mg, siempre vertical hacia abajo)
+     * Normal (N, perpendicular a la superficie, alejandose de ella)
+     * Tension (T, a lo largo de la cuerda, tirando del cuerpo)
+     * Rozamiento (f_RE o f_RD, paralelo a la superficie, opuesto al movimiento o tendencia)
+     * Fuerza elastica (F_e = -kx, a lo largo del resorte)
+     * Fuerza aplicada (F, segun indique el problema)
+     * Fuerza viscosa (F_v = -bv o -kv^2, opuesta a la velocidad)
+   - Para cada fuerza indicar nombre, direccion y sentido con flecha. Si no se conoce el sentido,
+     asumir uno y si sale negativo al resolver, significa que va al reves.
+   - Si hay mas de un cuerpo, hacer un DCL separado para cada uno. Las fuerzas de interaccion
+     aparecen en ambos DCL con sentidos opuestos (3ra ley de Newton).
+   - Dibujar los ejes explicitamente en el diagrama.
+
+   PASO 2 - Segunda Ley de Newton (Sigma F = ma):
+   Objetivo: escribir las ecuaciones de Newton en cada direccion.
+   - Para CADA cuerpo, escribir Sigma F = ma separando en componentes.
+     UNA ecuacion por cada direccion del SC (2 ecuaciones en 2D, 3 en 3D).
+   - Recorrer todas las fuerzas del DCL: "esta fuerza tiene componente en esta direccion?
+     Es positiva o negativa segun mis ejes?"
+   - Descomponer fuerzas inclinadas: el coseno va con el angulo ENTRE la fuerza y la direccion.
+     El seno va con la otra direccion.
+   - NO poner la aceleracion centripeta como fuerza. En movimiento circular,
+     el lado derecho de la ecuacion radial es mv^2/R (o m*omega^2*r). Esa NO es una fuerza.
+   - Si el cuerpo no se mueve en alguna direccion, poner a = 0 (queda Sigma F = 0).
+   - En coordenadas polares:
+     e_r: a_r = r'' - r*theta'^2
+     e_theta: a_theta = r*theta'' + 2*r'*theta'
+     Si r = cte (pendulo, circular): r'' = 0, r' = 0, queda a_r = -r*theta'^2, a_theta = r*theta''
+   - Numerar cada ecuacion (1), (2), (3)... para referenciar despues.
+
+   PASO 3 - PAR (Pares de Accion-Reaccion):
+   Objetivo: identificar que cuerpo o agente ejerce cada fuerza y relacionar fuerzas entre cuerpos.
+   - Para CADA fuerza del DCL, escribir quien la ejerce: "N <- superficie", "T <- cuerda",
+     "mg <- Tierra", "f_RE <- superficie del otro cuerpo".
+   - Si hay dos o mas cuerpos, identificar pares accion-reaccion entre ellos:
+     N_A/B = N_B/A (misma magnitud), f_roz A/B = f_roz B/A (misma magnitud).
+   - Estas igualdades se numeran como ecuaciones adicionales.
+
+   PASO 4 - Fisica (leyes de fuerza, vinculos, aproximaciones):
+   Objetivo: reemplazar cada fuerza por su expresion matematica y agregar condiciones.
+   - Leyes de fuerza:
+     * Peso: P = mg
+     * Normal: N = ? (incognita, sale de las ecuaciones)
+     * Tension: T = ? (incognita. Si cuerda inextensible y masa despreciable, misma T en ambos extremos)
+     * Rozamiento estatico (no desliza): f_RE <= mu_e * N. En limite (CMI): f_RE = mu_e * N
+     * Rozamiento dinamico (desliza): f_RD = mu_d * N
+     * Fuerza elastica: F_e = -k * Delta_x (Hooke, restauradora)
+     * Fuerza viscosa: F_v = -bv o F_v = -kv^2
+   - Vinculos del sistema:
+     * Cuerda inextensible: a_A = a_B (si se mueven juntos) o |a_A| = |a_B| (polea)
+     * Movimiento conjunto (CMI): a_A = a_B
+     * Radio constante: r = cte, r' = 0, r'' = 0
+     * Superficie: el cuerpo no se despega -> N >= 0
+   - Aproximaciones (si corresponde): angulo pequenio: sen(theta) ~ theta, cos(theta) ~ 1
+   - CONTEO: Listar incognitas y ecuaciones. Verificar #ecuaciones = #incognitas.
+
+   PASO 5 - Resolver:
+   Objetivo: despejar las incognitas y obtener valores numericos.
+   - Primero resolver SIMBOLICAMENTE (con letras), sin reemplazar numeros.
+   - Estrategia: eliminar incognitas que no se piden primero (despejar Normal de una ecuacion
+     y reemplazar en otra, sumar ecuaciones para cancelar fuerzas internas, etc.)
+   - Reemplazar datos numericos AL FINAL.
+   - Verificar: unidades correctas? Signo tiene sentido? Orden de magnitud razonable?
+   - Si una incognita sale negativa y se asumio una direccion, aclarar que va en sentido opuesto.
+   - Responder cada inciso referenciando las ecuaciones y resultados.
+
+   CASOS ESPECIALES:
+   - Movimiento circular uniforme: ecuacion radial tiene mv^2/R del lado derecho. a_t = 0.
+   - MAS: si la ecuacion se reduce a x'' + omega_0^2 * x = 0, el sistema hace MAS.
+     Solucion: x(t) = A * sen(omega_0 * t + phi). Condiciones iniciales determinan A y phi.
+   - Dos cuerpos que pueden deslizar: suponer primero que se mueven juntos (a_A = a_B).
+     Resolver. Verificar si f_RE necesario supera mu_e * N. Si lo supera, rehacer con
+     a_A != a_B y f_RD = mu_d * N.
+
+   COMO DETECTAR SI ES DINAMICA O CINEMATICA:
+   - Si el problema menciona fuerzas, masas, pesos, tensiones, normales, rozamiento,
+     resortes, o pide hallar fuerzas -> es DINAMICA, usar los 5 pasos de arriba.
+   - Si el problema solo habla de posicion, velocidad, aceleracion, trayectoria,
+     tiempos, distancias, sin mencionar fuerzas ni masas -> es CINEMATICA, usar la
+     metodologia de cinematica de abajo.
+   - Si tiene AMBOS (primero cinematica para describir el movimiento y luego dinamica
+     para hallar fuerzas), resolver cinematica primero y luego dinamica con los 5 pasos.
+
+   METODOLOGIA PARA CINEMATICA (Catedra Gasaneo - UNS):
+
+   PASO 1 - Identificar el tipo de movimiento:
+   - Rectilineo uniforme (v = cte, a = 0)
+   - Rectilineo uniformemente acelerado (a = cte)
+   - Circular uniforme (omega = cte, a_t = 0)
+   - Circular no uniforme (omega variable, a_t != 0)
+   - Curvilíneo general
+
+   PASO 2 - Elegir sistema de coordenadas:
+   - Cartesiano (x, y): para movimiento rectilineo o parabolico (tiro oblicuo)
+   - Polares (r, theta): para movimiento circular o espiral, donde el radio o el angulo son datos
+   - Intrinsecas (t, n): cuando se conoce la trayectoria y se pide descomponer en tangencial/normal
+   Declarar explicitamente: origen, ejes, sentido positivo.
+
+   PASO 3 - Escribir las ecuaciones de movimiento:
+   Usar EXCLUSIVAMENTE las formulas de la catedra segun el SC elegido:
+
+   En CARTESIANAS:
+     r(t) = x(t) x_hat + y(t) y_hat
+     v(t) = x'(t) x_hat + y'(t) y_hat
+     a(t) = x''(t) x_hat + y''(t) y_hat
+
+   En POLARES:
+     r(t) = r(t) e_r
+     v_r = r'          ,  v_theta = r * theta'
+     a_r = r'' - r * theta'^2    ,   a_theta = r * theta'' + 2 * r' * theta'
+     Si r = cte: v_r = 0, a_r = -r * theta'^2, a_theta = r * theta''
+
+   En INTRINSECAS:
+     v = s'(t)  (rapidez = derivada del arco)
+     a_t = s''(t) = v'  (componente tangencial)
+     a_n = v^2 / rho    (componente normal, rho = radio de curvatura)
+
+   NO usar otras formulas que no sean estas. NO inventar formulas.
+
+   PASO 4 - Aplicar condiciones iniciales y datos:
+   - Reemplazar las condiciones iniciales (x(0), v(0), theta(0), etc.)
+   - Usar los datos del problema para determinar constantes de integracion
+   - Si dan la trayectoria (ej: y = f(x)), derivar para obtener v y a
+
+   PASO 5 - Resolver y verificar:
+   - Resolver simbolicamente primero, numericamente despues
+   - Verificar unidades, signos y orden de magnitud
+   - Si piden graficar: generar bloques de codigo Python con matplotlib
+
 3. ADAPTACION: Debes adaptar el nivel de tu explicacion segun el nivel del usuario si este te lo pide. Explica conceptos teoricos con tono cientifico pero accesible e intuitivo.
 4. GRAFICOS (Solo en Cinematica): Si el usuario te pide explicitamente grafica o generarme un grafico de posicion, velocidad o aceleracion vs tiempo, DEBES devolver un bloque de codigo Python ejecutable usando la libreria matplotlib.pyplot.
    - El codigo debe estar rodeado de ```python y ```.
@@ -826,7 +1127,30 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
      Ejemplo correcto: plt.ylabel(r'$\theta$ (rad)')
      Ejemplo INCORRECTO: plt.ylabel("$\\\\theta$ (rad)")
      Ejemplo INCORRECTO: plt.ylabel("$$\\\\vec{v}$$")
-5. FORMATO DE FORMULAS MATEMATICAS (MUY IMPORTANTE - CUMPLIR SIEMPRE):
+5. FORMATO DE TITULOS DE METODOLOGIA (MUY IMPORTANTE):
+   Cuando uses la metodologia de 5 pasos, cada titulo de paso DEBE ser un encabezado markdown con ##.
+   Ejemplos CORRECTOS:
+   ## ANTES DE EMPEZAR
+   ## PASO 1 - DCL (Diagrama de Cuerpo Libre)
+   ## PASO 2 - Segunda Ley de Newton
+   ## PASO 3 - PAR
+   ## PASO 4 - Fisica
+   ## PASO 5 - Resolver
+   ## CASOS ESPECIALES
+   Ejemplo INCORRECTO: **PASO 1 - DCL** (esto NO es un encabezado, no usar negritas para pasos)
+   Cada paso debe ir en su propio encabezado ## separado del texto anterior por una linea en blanco.
+
+   FORMATO DEL CONTENIDO DENTRO DE CADA PASO:
+   Cuando listes fuerzas, cuerpos, ecuaciones o datos, usa viñetas markdown (* o -) para cada item.
+   Ejemplo:
+   ## PASO 1 - DCL
+   * **Peso** (P = mg): Actua verticalmente hacia abajo.
+   * **Normal** (N): Perpendicular a la superficie, hacia afuera.
+   * **Tension** (T): A lo largo de la cuerda, tirando del cuerpo.
+   NO escribas todo como un parrafo largo corrido. Cada fuerza, cada cuerpo, cada ecuacion
+   debe ser un item separado con viñeta para que sea legible.
+
+6. FORMATO DE FORMULAS MATEMATICAS (MUY IMPORTANTE - CUMPLIR SIEMPRE):
    REGLA GENERAL: Toda expresion matematica, variable, vector, letra griega o formula debe mostrarse
    con simbolos matematicos Unicode o LaTeX. NUNCA con texto plano tipo codigo.
 
@@ -935,16 +1259,36 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
       - Dibujar la cuerda como una linea negra desde el pivote hasta la masa.
       - La masa esta en el extremo inferior de la cuerda.
       - El peso va RECTO HACIA ABAJO desde la masa (no a lo largo de la cuerda).
+        DIBUJAR SOLO EL VECTOR PESO mg VERTICAL. NO dibujar componentes P_r ni P_theta.
       - La tension va DESDE LA MASA HACIA EL PIVOTE (a lo largo de la cuerda).
+      - SOLO dibujar las FUERZAS REALES: Peso (mg, rojo, vertical abajo) y Tension (T, azul, hacia pivote).
+        NUNCA dibujar componentes de fuerzas (P_r, P_theta, mgcos, mgsen) en el DCL.
+        Las componentes se descomponen en el PASO 2 (ecuaciones), NO en el dibujo.
 
       PARA PLANOS INCLINADOS ESPECIFICAMENTE:
       - Dibujar la superficie inclinada como una linea GRIS GRUESA (lw=3).
-      - La masa se dibuja SOBRE la superficie, NO flotando en el aire.
+      - La masa se dibuja SOBRE la superficie, NO flotando en el aire ni en el origen.
       - Normal: PERPENDICULAR a la superficie inclinada, apuntando HACIA AFUERA de la superficie.
-        Si el plano tiene angulo alpha con la horizontal, la Normal forma angulo alpha con la vertical.
-      - Friccion (si existe): TANGENTE a la superficie, OPUESTA al movimiento o tendencia de movimiento.
-      - Peso: SIEMPRE VERTICAL HACIA ABAJO, sin importar la inclinacion del plano.
-      - Si hay cuerda: dibujar la cuerda y la tension va A LO LARGO de ella hacia el punto de sujecion.
+        Direccion de la normal: (-sin(alpha), cos(alpha)) donde alpha es el angulo del plano.
+      - Friccion (si existe): TANGENTE a la superficie, OPUESTA al movimiento.
+        Si el bloque sube por el plano, la friccion apunta plano abajo: (-cos(alpha), -sin(alpha)).
+        Si el bloque baja por el plano, la friccion apunta plano arriba: (cos(alpha), sin(alpha)).
+      - Peso: SIEMPRE VERTICAL HACIA ABAJO (0, -1). NUNCA descomponer en componentes en el dibujo.
+        NO dibujar P_x ni P_y ni mg*sin ni mg*cos. Solo el vector peso completo hacia abajo.
+      - Tension: A LO LARGO del plano hacia la polea: (cos(alpha), sin(alpha)) si la polea esta arriba.
+      - Para el bloque que CUELGA VERTICALMENTE de la polea:
+        REGLA ABSOLUTA E INVIOLABLE:
+        * Peso P_M: flecha ROJA que va desde el centro del cuerpo HACIA ABAJO.
+          En el codigo: xytext=(cx, cy), xy=(cx, cy - L), color='red'.
+          La coordenada y del destino es MENOR que la del origen (cy - L < cy).
+        * Tension T: flecha AZUL que va desde el centro del cuerpo HACIA ARRIBA.
+          En el codigo: xytext=(cx, cy), xy=(cx, cy + L), color='blue'.
+          La coordenada y del destino es MAYOR que la del origen (cy + L > cy).
+        VERIFICACION: si en tu codigo el peso tiene cy + algo, ESTA MAL. El peso BAJA.
+        Si la tension tiene cy - algo, ESTA MAL. La tension SUBE.
+      - EJEMPLO de posicion del bloque sobre el plano:
+        Si el plano va de (x0,y0) a (x1,y1), el bloque se coloca en un punto intermedio
+        SOBRE la linea del plano, no en el origen de coordenadas.
       - NO mezclar estas reglas con las de pendulos ni conos.
 
       PARA SUPERFICIES CONICAS ESPECIFICAMENTE:
@@ -1463,25 +1807,63 @@ class AppFisica(ctk.CTk):
         threading.Thread(target=tarea, daemon=True).start()
 
     def _extraer_bloques_python(self, texto):
-        """Extrae TODOS los bloques ```python ... ``` de la respuesta (case-insensitive)."""
+        """Extrae TODOS los bloques de codigo Python de la respuesta."""
         bloques = []
-        # Buscar con regex para capturar variantes: ```python, ```Python, ``` python, etc.
+        # 1) Buscar bloques con ``` markers
         patron = re.compile(r'```[Pp]ython\s*\n(.*?)```', re.DOTALL)
         for match in patron.finditer(texto):
             codigo = match.group(1).strip()
             if codigo:
                 bloques.append(codigo)
-        # Debug: imprimir cuantos bloques se detectaron
+
+        # 2) Si no hay bloques con ```, buscar codigo suelto (sin markers)
+        if not bloques and ('plt.' in texto or 'matplotlib' in texto or 'subplots' in texto):
+            patrones_codigo = [
+                r'^import\s+', r'^from\s+\w+\s+import', r'^fig\s*[,=]', r'^ax\d*[\.\s=]',
+                r'^plt\.', r'^np\.', r'\.annotate\(', r'\.add_patch\(',
+                r'\.set_aspect\(', r'\.set_xlim\(', r'\.set_ylim\(', r'\.set_title\(',
+                r'\.legend\(', r'\.plot\(', r'\.text\(', r'arrowprops\s*=',
+                r'plt\.show\(\)', r'plt\.tight_layout', r'plt\.subplots\(',
+                r'patches\.', r'^\w+_\w+\s*=.*\d', r'^#\s+\w',
+            ]
+            def es_codigo(linea):
+                s = linea.strip()
+                if not s:
+                    return True
+                if s.startswith('#') and not s.startswith('##'):
+                    return True
+                return any(re.search(p, s) for p in patrones_codigo)
+
+            lineas = texto.split('\n')
+            bloque_actual = []
+            en_codigo = False
+            for linea in lineas:
+                if not en_codigo:
+                    if es_codigo(linea) and linea.strip():
+                        en_codigo = True
+                        bloque_actual = [linea]
+                else:
+                    if es_codigo(linea):
+                        bloque_actual.append(linea)
+                    else:
+                        if len(bloque_actual) >= 5:
+                            codigo = '\n'.join(bloque_actual).strip()
+                            if 'plt.' in codigo or 'matplotlib' in codigo:
+                                bloques.append(codigo)
+                        bloque_actual = []
+                        en_codigo = False
+            if en_codigo and len(bloque_actual) >= 5:
+                codigo = '\n'.join(bloque_actual).strip()
+                if 'plt.' in codigo or 'matplotlib' in codigo:
+                    bloques.append(codigo)
+
         if bloques:
             print(f"[DEBUG] Se detectaron {len(bloques)} bloque(s) de codigo Python en la respuesta.")
             for i, b in enumerate(bloques):
                 primera_linea = b.split('\n')[0][:80]
                 print(f"  Bloque {i+1}: {primera_linea}")
         else:
-            print("[DEBUG] NO se detectaron bloques ```python en la respuesta.")
-            # Mostrar si hay algun indicio de codigo
-            if "import matplotlib" in texto or "plt." in texto:
-                print("[DEBUG] PERO se encontro 'matplotlib' o 'plt.' en el texto sin bloque de codigo.")
+            print("[DEBUG] NO se detectaron bloques de codigo Python en la respuesta.")
         return bloques
 
     def _extraer_codigo_por_tipo(self, texto, marcador):
