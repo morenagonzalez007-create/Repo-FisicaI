@@ -1354,12 +1354,19 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
         - "Versores" en color negro
       Usar: ax.plot([], [], color='red', lw=3, label='v⃗  Velocidad'), etc. y ax.legend(loc='lower left')
 
-      ESCALA DE FLECHAS - MUY IMPORTANTE:
-      Los vectores v⃗ y a⃗ suelen ser muy chicos comparados con la posicion.
-      SIEMPRE escala las flechas para que midan entre 4 y 6 unidades en el grafico:
-        escala_v = 5.0 / abs(v_magnitud)
-        escala_a = 5.0 / abs(a_magnitud)
-      Los versores deben medir 3 unidades (escala fija = 3).
+      ESCALA DE FLECHAS Y LIMITES DE EJES - MUY IMPORTANTE:
+      Los vectores v⃗ y a⃗ suelen ser muy chicos o muy grandes comparados con la posicion.
+      SIEMPRE escala las flechas para que midan aproximadamente 0.7 unidades en el grafico:
+        escala_v = 0.7 / mag_v if mag_v != 0 else 0
+        escala_a = 0.7 / mag_a if mag_a != 0 else 0
+      Los versores deben medir 0.5 unidades (escala fija = 0.5).
+      DESPUES de calcular todas las posiciones de las puntas de vectores, ajustar los limites
+      de los ejes para que TODOS los vectores queden DENTRO del grafico con margen:
+        todas_x = [0, x_part, punta_v_x, punta_a_x, punta_versor1_x, punta_versor2_x]
+        todas_y = [0, y_part, punta_v_y, punta_a_y, punta_versor1_y, punta_versor2_y]
+        margen = 0.5
+        ax.set_xlim(min(todas_x) - margen, max(todas_x) + margen)
+        ax.set_ylim(min(todas_y) - margen, max(todas_y) + margen)
       Agrega una nota: ax.text(..., "Vectores escalados", fontsize=9, color='gray')
 
       REGLA CRITICA DE CODIGO - COMO DIBUJAR FLECHAS:
