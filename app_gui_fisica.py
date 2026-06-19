@@ -9,7 +9,8 @@ import webbrowser
 from io import BytesIO
 
 import customtkinter as ctk
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 from dotenv import load_dotenv
 from tkinter import filedialog, messagebox
 
@@ -206,13 +207,15 @@ def _arreglar_latex_en_codigo(codigo):
     lineas = codigo.split('\n')
     resultado = []
     for linea in lineas:
-        # NO tocar raw strings (r'...' o r"...") - matplotlib las maneja bien
-        if re.search(r"""\br(['"])""", linea):
+        # NO tocar lineas de import, comentarios, o lineas sin strings
+        if linea.strip().startswith(('#', 'import', 'from')) or ('"' not in linea and "'" not in linea):
             resultado.append(linea)
             continue
 
-        # NO tocar lineas de import, comentarios, o lineas sin strings
-        if linea.strip().startswith(('#', 'import', 'from')) or ('"' not in linea and "'" not in linea):
+        # Limpiar LaTeX invalido dentro de raw strings (r'$y\'$' -> r'$y$')
+        # \' \" \` no son comandos LaTeX validos y rompen matplotlib
+        if re.search(r"""\br(['"])""", linea):
+            linea = re.sub(r"""\\(['"`])""", '', linea)
             resultado.append(linea)
             continue
 
@@ -948,7 +951,7 @@ class AsistenteFisica:
                 "No se encontro la API Key. Crea un archivo .env con GEMINI_API_KEY=tu_clave"
             )
 
-        genai.configure(api_key=api_key)
+        self.client = genai.Client(api_key=api_key)
 
         system_instruction = """
 Eres un Asistente y Tutor Avanzado de Fisica I a nivel universitario.
@@ -1292,16 +1295,35 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
       - NO mezclar estas reglas con las de pendulos ni conos.
 
       PARA SUPERFICIES CONICAS ESPECIFICAMENTE:
-      - Dibujar el PERFIL del cono (las dos paredes inclinadas) como lineas GRISES gruesas (lw=3)
-        formando una V invertida o V segun la orientacion del cono.
-      - La masa se dibuja SOBRE la pared del cono, NO en el centro ni en el vertice.
-      - Normal: PERPENDICULAR a la PARED CONICA, apuntando hacia el INTERIOR del cono (hacia el eje).
-        En un cono con semiangulo alpha, la Normal forma angulo alpha con la horizontal.
-      - Tension (si hay cuerda que pasa por el vertice): va DESDE LA MASA HACIA EL VERTICE del cono,
-        A LO LARGO de la cuerda. NO apunta hacia arriba ni al aire.
-      - Peso: SIEMPRE VERTICAL HACIA ABAJO desde la masa.
-      - Si hay una pesa colgando del otro extremo de la cuerda, hacer DOS subplots separados:
-        uno para el objeto sobre el cono y otro para la pesa colgante (con su propio DCL).
+      GEOMETRIA DEL DIBUJO (OBLIGATORIO):
+      - Usar UN SOLO subplot para el DCL del objeto sobre el cono (si hay pesa colgante, usar 2 subplots).
+      - Ejes: r (horizontal, hacia la derecha) y z (vertical, hacia arriba).
+      - Dibujar el PERFIL COMPLETO del cono como DOS lineas GRISES gruesas (lw=3, color='gray'):
+        * Vertice del cono en (0, 0).
+        * Pared izquierda: desde (0,0) hasta (-4*sin(alpha), 4*cos(alpha)).
+        * Pared derecha: desde (0,0) hasta (4*sin(alpha), 4*cos(alpha)).
+        Esto forma una V invertida (vertice abajo) si alpha < 90.
+      - Colocar la masa como punto NEGRO grande (ms=15) sobre la PARED DERECHA del cono.
+        Posicion EXACTA: r_m = 3*sin(alpha), z_m = 3*cos(alpha).
+        La masa DEBE estar visualmente SOBRE la linea gris de la pared derecha.
+      - TODAS las flechas de fuerza PARTEN desde (r_m, z_m).
+      - Usar ax.set_xlim(-2, 6) y ax.set_ylim(-3, 5) para centrar bien el dibujo.
+
+      DIRECCIONES DE FUERZAS (coordenadas r, z):
+      - Peso P = mg: VERTICAL HACIA ABAJO. Color ROJO.
+        xy=(r_m, z_m - L), xytext=(r_m, z_m).
+      - Normal N: PERPENDICULAR a la pared, hacia el INTERIOR del cono (hacia el eje z).
+        Direccion: (-cos(alpha), sin(alpha)). Color AZUL.
+        xy=(r_m - L*cos(alpha), z_m + L*sin(alpha)), xytext=(r_m, z_m).
+      - Tension T (cuerda hacia el vertice): A LO LARGO de la pared, HACIA EL VERTICE (0,0).
+        Direccion: (-sin(alpha), -cos(alpha)). Color VERDE.
+        xy=(r_m - L*sin(alpha), z_m - L*cos(alpha)), xytext=(r_m, z_m).
+      - L = 2.5 para todas las flechas (longitud visual uniforme).
+
+      PESA COLGANTE (si existe):
+      - Hacer fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8)).
+        ax1: DCL del objeto sobre el cono (con las reglas de arriba).
+        ax2: DCL de la pesa: masa en (0, 0), Peso ROJO abajo xy=(0, -L), Tension AZUL arriba xy=(0, L).
       - NO mezclar estas reglas con las de pendulos ni planos inclinados.
 
    B) VECTORES Y VERSORES - TODO EN UN SOLO GRAFICO:
@@ -1397,12 +1419,12 @@ SIN estos bloques de codigo tu respuesta esta INCOMPLETA. NUNCA omitas los grafi
 RESPONDE DE FORMA CLARA Y NO TE SALGAS DE TU ROL.
 """
 
-        self.model = genai.GenerativeModel(
-            "gemini-2.5-flash",
-            system_instruction=system_instruction,
+        self.chat = self.client.chats.create(
+            model="gemini-2.5-flash",
+            config=genai_types.GenerateContentConfig(
+                systemInstruction=system_instruction,
+            ),
         )
-
-        self.chat = self.model.start_chat(history=[])
 
     def cargar_pdfs_desde_carpeta(self, pdf_directory="apuntes_catedra"):
         self.uploaded_files = []
@@ -1418,7 +1440,7 @@ RESPONDE DE FORMA CLARA Y NO TE SALGAS DE TU ROL.
 
         for pdf_path in pdf_files:
             try:
-                archivo = genai.upload_file(path=pdf_path)
+                archivo = self.client.files.upload(file=pdf_path)
                 self.uploaded_files.append(archivo)
             except Exception as e:
                 errores.append(f"{os.path.basename(pdf_path)}: {e}")
@@ -1444,7 +1466,7 @@ RESPONDE DE FORMA CLARA Y NO TE SALGAS DE TU ROL.
 
     def preguntar(self, pregunta, imagen_path=None):
         if imagen_path:
-            imagen = genai.upload_file(imagen_path)
+            imagen = self.client.files.upload(file=imagen_path)
             contenido = [imagen, pregunta]
         else:
             contenido = pregunta
@@ -1818,28 +1840,44 @@ class AppFisica(ctk.CTk):
 
         # 2) Si no hay bloques con ```, buscar codigo suelto (sin markers)
         if not bloques and ('plt.' in texto or 'matplotlib' in texto or 'subplots' in texto):
-            patrones_codigo = [
-                r'^import\s+', r'^from\s+\w+\s+import', r'^fig\s*[,=]', r'^ax\d*[\.\s=]',
-                r'^plt\.', r'^np\.', r'\.annotate\(', r'\.add_patch\(',
-                r'\.set_aspect\(', r'\.set_xlim\(', r'\.set_ylim\(', r'\.set_title\(',
-                r'\.legend\(', r'\.plot\(', r'\.text\(', r'arrowprops\s*=',
-                r'plt\.show\(\)', r'plt\.tight_layout', r'plt\.subplots\(',
-                r'patches\.', r'^\w+_\w+\s*=.*\d', r'^#\s+\w',
-            ]
             def es_codigo(linea):
                 s = linea.strip()
                 if not s:
                     return True
+                if s.startswith('# GRAFICO_'):
+                    return True
                 if s.startswith('#') and not s.startswith('##'):
                     return True
-                return any(re.search(p, s) for p in patrones_codigo)
+                # Lineas que claramente NO son codigo
+                if s.startswith('##'):
+                    return False
+                if s.startswith('**'):
+                    return False
+                if s.startswith('* ') or s.startswith('- '):
+                    return False
+                if s.startswith('[GRAFICO:'):
+                    return False
+                # Variable assignment (alpha_deg = 60, block_center = ...)
+                if re.match(r'^\w+\s*=\s*.+', s):
+                    return True
+                # Function calls, method calls, indented code
+                if re.match(r'^(import|from|fig|ax|plt|np|patches|if |for |def |else|elif|try|except|with )', s):
+                    return True
+                if re.search(r'\.\w+\(', s):
+                    return True
+                if re.search(r'arrowprops|arrowstyle|fontsize|color\s*=|lw\s*=|zorder', s):
+                    return True
+                if s.startswith('    ') or s.startswith('\t'):
+                    return True
+                return False
 
             lineas = texto.split('\n')
             bloque_actual = []
             en_codigo = False
             for linea in lineas:
                 if not en_codigo:
-                    if es_codigo(linea) and linea.strip():
+                    s = linea.strip()
+                    if s and es_codigo(linea) and not s.startswith('#') or s.startswith('# GRAFICO_') or s.startswith('import '):
                         en_codigo = True
                         bloque_actual = [linea]
                 else:
@@ -1884,6 +1922,9 @@ class AppFisica(ctk.CTk):
             for i, codigo in enumerate(bloques):
                 # Sanitizar argumentos invalidos de matplotlib (head_width, etc.)
                 codigo = _sanitizar_codigo_matplotlib(codigo)
+                # Asegurar que el codigo tenga plt.show() al final
+                if 'plt.show()' not in codigo:
+                    codigo += '\nplt.show()\n'
                 # Arreglar backslashes de LaTeX en labels de matplotlib
                 codigo_fijo = _arreglar_latex_en_codigo(codigo)
                 with tempfile.NamedTemporaryFile(
@@ -1914,9 +1955,9 @@ class AppFisica(ctk.CTk):
             # Esperar a que todos terminen y recolectar errores
             errores_totales = []
             for i, proc in enumerate(procesos):
-                proc.wait()
+                _, stderr_output = proc.communicate(timeout=60)
                 if proc.returncode != 0:
-                    error_msg = (proc.stderr.read() if proc.stderr else "").strip()
+                    error_msg = (stderr_output or "").strip()
                     lineas_error = error_msg.split('\n')
                     resumen = '\n'.join(lineas_error[-5:]) if len(lineas_error) > 5 else error_msg
                     if not resumen:
