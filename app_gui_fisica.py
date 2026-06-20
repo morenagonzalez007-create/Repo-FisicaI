@@ -1261,14 +1261,24 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
         tambien la estructura (cuerda, superficie) en color negro/gris.
 
       PARA PENDULOS ESPECIFICAMENTE:
-      - Dibujar el punto de suspension (pivote) como un punto gris arriba.
-      - Dibujar la cuerda como una linea negra desde el pivote hasta la masa.
-      - La masa esta en el extremo inferior de la cuerda.
-      - El peso va RECTO HACIA ABAJO desde la masa (no a lo largo de la cuerda).
-        DIBUJAR SOLO EL VECTOR PESO mg VERTICAL. NO dibujar componentes P_r ni P_theta.
-      - La tension va DESDE LA MASA HACIA EL PIVOTE (a lo largo de la cuerda).
-      - SOLO dibujar las FUERZAS REALES: Peso (mg, rojo, vertical abajo) y Tension (T, azul, hacia pivote).
-        NUNCA dibujar componentes de fuerzas (P_r, P_theta, mgcos, mgsen) en el DCL.
+      GEOMETRIA DEL DIBUJO (OBLIGATORIO):
+      - Eje y positivo hacia ARRIBA. El pivote esta ARRIBA, la masa ABAJO.
+      - Pivote: punto gris en (0, 0).
+      - Posicion de la masa: x_m = L_dibujo * sin(theta), y_m = -L_dibujo * cos(theta).
+        Donde L_dibujo = 3 (longitud visual) y theta es el angulo con la vertical.
+        VERIFICAR: y_m DEBE ser NEGATIVO (la masa cuelga ABAJO del pivote).
+      - Cuerda: linea negra punteada desde (0, 0) hasta (x_m, y_m).
+      - Usar ax.set_xlim(-5, 5) y ax.set_ylim(-6, 2).
+
+      FUERZAS (todas parten desde (x_m, y_m)):
+      - Peso P = mg: VERTICAL HACIA ABAJO. Color ROJO. L = 2.5.
+        xy=(x_m, y_m - L), xytext=(x_m, y_m).
+        VERIFICAR: la coordenada y del destino (y_m - L) es MAS NEGATIVA que y_m. Si sube, ESTA MAL.
+      - Tension T: DESDE LA MASA HACIA EL PIVOTE, a lo largo de la cuerda. Color AZUL.
+        Direccion: (-sin(theta), cos(theta)). Apunta hacia ARRIBA-IZQUIERDA (o ARRIBA-DERECHA segun theta).
+        xy=(x_m - L*sin(theta), y_m + L*cos(theta)), xytext=(x_m, y_m).
+        VERIFICAR: la coordenada y del destino es MAS POSITIVA que y_m (la tension SUBE).
+      - SOLO dibujar Peso y Tension. NUNCA dibujar componentes (P_r, P_theta, mgcos, mgsen).
         Las componentes se descomponen en el PASO 2 (ecuaciones), NO en el dibujo.
 
       PARA PLANOS INCLINADOS ESPECIFICAMENTE:
