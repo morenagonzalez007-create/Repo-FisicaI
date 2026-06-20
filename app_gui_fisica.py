@@ -6,7 +6,9 @@ import tempfile
 import threading
 import sys
 import webbrowser
+import csv
 from io import BytesIO
+from datetime import datetime
 
 import customtkinter as ctk
 from google import genai
@@ -929,7 +931,8 @@ mjx-container[display="true"] .MathJax {{ display: block !important; }}
 
     with tempfile.NamedTemporaryFile('w', suffix='.html', delete=False, encoding='utf-8') as f:
         f.write(html)
-        webbrowser.open(f.name)
+        ruta_html = f.name
+    webbrowser.open('file://' + ruta_html)
 
 
 # ==========================================================
@@ -1505,6 +1508,8 @@ class AppFisica(ctk.CTk):
         self.formula_renderer = FormulaRenderer()
         self._last_response = ""
         self.imagen_adjunta = None  # ruta de imagen adjunta para enviar con la consulta
+        self._last_question = ""    # ultima consulta enviada (para el registro de feedback)
+        self._feedback_dado = False  # evita que se vote dos veces la misma respuesta
         self._crear_interfaz()
         self._inicializar_asistente()
 
@@ -1634,13 +1639,50 @@ class AppFisica(ctk.CTk):
         self.texto_salida.grid(row=1, column=0, padx=16, pady=(0, 10), sticky="nsew")
         self.texto_salida.insert("1.0", "Bienvenida. Inicializando asistente...\n")
 
+        # ---------------- BARRA DE FEEDBACK ----------------
+        # Aparece recien cuando llega una respuesta. Guarda la valoracion del
+        # usuario (correcta / incompleta / incorrecta) en feedback_respuestas.csv.
+        self.frame_feedback = ctk.CTkFrame(right, fg_color="transparent")
+        self.frame_feedback.grid(row=2, column=0, padx=16, pady=(0, 6), sticky="ew")
+
+        self.label_feedback = ctk.CTkLabel(
+            self.frame_feedback,
+            text="¿Como estuvo esta respuesta?",
+            font=ctk.CTkFont(size=13),
+            text_color="gray70",
+        )
+        self.label_feedback.grid(row=0, column=0, padx=(0, 10), pady=4, sticky="w")
+
+        self.boton_correcta = ctk.CTkButton(
+            self.frame_feedback, text="✅ Correcta", width=110,
+            fg_color="#2d6a4f", hover_color="#40916c",
+            command=lambda: self._registrar_feedback("correcta"),
+        )
+        self.boton_correcta.grid(row=0, column=1, padx=4, pady=4)
+
+        self.boton_incompleta = ctk.CTkButton(
+            self.frame_feedback, text="🟡 Incompleta", width=110,
+            fg_color="#b45309", hover_color="#d97706",
+            command=lambda: self._registrar_feedback("incompleta"),
+        )
+        self.boton_incompleta.grid(row=0, column=2, padx=4, pady=4)
+
+        self.boton_incorrecta = ctk.CTkButton(
+            self.frame_feedback, text="❌ Incorrecta", width=110,
+            fg_color="#7f1d1d", hover_color="#991b1b",
+            command=lambda: self._registrar_feedback("incorrecta"),
+        )
+        self.boton_incorrecta.grid(row=0, column=3, padx=4, pady=4)
+
+        self.frame_feedback.grid_remove()  # oculta hasta que haya una respuesta
+
         self.estado = ctk.CTkLabel(
             right,
             text="Estado: iniciando...",
             anchor="w",
             text_color="gray70",
         )
-        self.estado.grid(row=2, column=0, padx=16, pady=(0, 16), sticky="ew")
+        self.estado.grid(row=3, column=0, padx=16, pady=(0, 16), sticky="ew")
 
         self.bind("<Command-Return>", lambda event: self.enviar_consulta())
         self.bind("<Control-Return>", lambda event: self.enviar_consulta())
@@ -1680,6 +1722,49 @@ class AppFisica(ctk.CTk):
 
     def _cambiar_estado(self, texto):
         self.estado.configure(text=f"Estado: {texto}")
+
+    # ---------------- FEEDBACK DEL USUARIO ----------------
+    def _mostrar_feedback(self):
+        """Muestra la barra de feedback y reinicia su estado."""
+        self._feedback_dado = False
+        self.label_feedback.configure(text="¿Como estuvo esta respuesta?", text_color="gray70")
+        self.boton_correcta.configure(state="normal")
+        self.boton_incompleta.configure(state="normal")
+        self.boton_incorrecta.configure(state="normal")
+        self.frame_feedback.grid()
+
+    def _ocultar_feedback(self):
+        """Oculta la barra de feedback (al enviar una nueva consulta)."""
+        self.frame_feedback.grid_remove()
+
+    def _registrar_feedback(self, valoracion):
+        """Guarda la valoracion del usuario en feedback_respuestas.csv."""
+        if self._feedback_dado:
+            return
+        self._feedback_dado = True
+
+        archivo = "feedback_respuestas.csv"
+        existe = os.path.exists(archivo)
+        try:
+            with open(archivo, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                if not existe:
+                    writer.writerow(["fecha_hora", "valoracion", "consulta"])
+                writer.writerow([
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    valoracion,
+                    self._last_question,
+                ])
+            self.label_feedback.configure(
+                text=f"¡Gracias! Registrado como: {valoracion}", text_color="#40916c"
+            )
+        except Exception as e:
+            self.label_feedback.configure(text=f"No se pudo guardar: {e}", text_color="#d97706")
+
+        # Desactivar los botones para que no se vote dos veces la misma respuesta
+        self.boton_correcta.configure(state="disabled")
+        self.boton_incompleta.configure(state="disabled")
+        self.boton_incorrecta.configure(state="disabled")
 
     def _set_botones_habilitados(self, habilitados):
         estado = "normal" if habilitados else "disabled"
@@ -1724,6 +1809,9 @@ class AppFisica(ctk.CTk):
 
         # Capturar imagen adjunta antes de lanzar el hilo
         imagen_para_enviar = self.imagen_adjunta
+        # Guardar la consulta y ocultar el feedback de la respuesta anterior
+        self._last_question = pregunta
+        self._ocultar_feedback()
         if imagen_para_enviar:
             nombre_img = os.path.basename(imagen_para_enviar)
             self._append_salida(f"\n{'='*50}\n[Tu]\n{pregunta}\n(Imagen adjunta: {nombre_img})\n\n")
@@ -1771,6 +1859,9 @@ class AppFisica(ctk.CTk):
                 # Abrir HTML automaticamente
                 abrir_en_navegador(respuesta)
 
+                # Mostrar la barra de feedback (en el hilo principal de la UI)
+                self.after(0, self._mostrar_feedback)
+
                 self._cambiar_estado("Respuesta lista. Ver navegador.")
             except Exception as e:
                 self._append_salida(f"[Error] {e}\n")
@@ -1786,6 +1877,7 @@ class AppFisica(ctk.CTk):
             return
 
         self._set_botones_habilitados(False)
+        self._ocultar_feedback()
         self._cambiar_estado("Ejecutando evaluacion...")
         self._append_salida(f"\n{'='*50}\n[Modo Evaluar] Iniciando prueba conceptual...\n")
 
@@ -1793,12 +1885,16 @@ class AppFisica(ctk.CTk):
             try:
                 pregunta, respuesta = self.asistente.evaluar()
                 self._last_response = respuesta
+                self._last_question = pregunta
                 self._append_salida(f"\n[Pregunta de evaluacion]\n{pregunta}\n\n")
                 self._append_salida("[Agente Fisica] Evaluacion completada.\n")
                 self._append_salida("La respuesta completa se abrio en el navegador.\n")
 
                 # Abrir HTML automaticamente
                 abrir_en_navegador(respuesta)
+
+                # Mostrar la barra de feedback (en el hilo principal de la UI)
+                self.after(0, self._mostrar_feedback)
 
                 self._cambiar_estado("Evaluacion completada. Ver navegador.")
             except Exception as e:
