@@ -1308,29 +1308,42 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
       - NO mezclar estas reglas con las de pendulos ni conos.
 
       PARA SUPERFICIES CONICAS ESPECIFICAMENTE:
+      PASO PREVIO - DETERMINAR INTERIOR O EXTERIOR:
+      Lee el enunciado y la imagen cuidadosamente. Determina si el objeto esta en la
+      superficie INTERIOR (dentro del cono) o EXTERIOR (fuera del cono, apoyado sobre la pared externa).
+      Esto cambia la direccion de la Normal.
+
       GEOMETRIA DEL DIBUJO (OBLIGATORIO):
       - Usar UN SOLO subplot para el DCL del objeto sobre el cono (si hay pesa colgante, usar 2 subplots).
       - Ejes: r (horizontal, hacia la derecha) y z (vertical, hacia arriba).
-      - Dibujar el PERFIL COMPLETO del cono como DOS lineas GRISES gruesas (lw=3, color='gray'):
-        * Vertice del cono en (0, 0).
-        * Pared izquierda: desde (0,0) hasta (-4*sin(alpha), 4*cos(alpha)).
-        * Pared derecha: desde (0,0) hasta (4*sin(alpha), 4*cos(alpha)).
-        Esto forma una V invertida (vertice abajo) si alpha < 90.
-      - Colocar la masa como punto NEGRO grande (ms=15) sobre la PARED DERECHA del cono.
-        Posicion EXACTA: r_m = 3*sin(alpha), z_m = 3*cos(alpha).
-        La masa DEBE estar visualmente SOBRE la linea gris de la pared derecha.
+      - Determinar la orientacion del cono segun el enunciado:
+        * Si el vertice esta ARRIBA (cono apoyado en mesa, vertice arriba):
+          Vertice en (0, 4). Paredes hacia abajo y afuera.
+          Pared izquierda: desde vertice hasta (-4*sin(alpha), 4 - 4*cos(alpha)).
+          Pared derecha: desde vertice hasta (4*sin(alpha), 4 - 4*cos(alpha)).
+          Posicion de la masa: r_m = 3*sin(alpha), z_m = 4 - 3*cos(alpha).
+        * Si el vertice esta ABAJO (cono invertido):
+          Vertice en (0, 0). Paredes hacia arriba y afuera.
+          Pared izquierda: desde (0,0) hasta (-4*sin(alpha), 4*cos(alpha)).
+          Pared derecha: desde (0,0) hasta (4*sin(alpha), 4*cos(alpha)).
+          Posicion de la masa: r_m = 3*sin(alpha), z_m = 3*cos(alpha).
+      - Dibujar las paredes como lineas GRISES gruesas (lw=3, color='gray').
+      - Colocar la masa como punto NEGRO grande (ms=15) sobre la PARED DERECHA.
       - TODAS las flechas de fuerza PARTEN desde (r_m, z_m).
-      - Usar ax.set_xlim(-2, 6) y ax.set_ylim(-3, 5) para centrar bien el dibujo.
+      - Usar ax.set_xlim(-2, 6) y ax.set_ylim(-3, 6) para centrar bien el dibujo.
 
       DIRECCIONES DE FUERZAS (coordenadas r, z):
-      - Peso P = mg: VERTICAL HACIA ABAJO. Color ROJO.
+      - Peso P = mg: SIEMPRE VERTICAL HACIA ABAJO. Color ROJO.
         xy=(r_m, z_m - L), xytext=(r_m, z_m).
-      - Normal N: PERPENDICULAR a la pared, hacia el INTERIOR del cono (hacia el eje z).
-        Direccion: (-cos(alpha), sin(alpha)). Color AZUL.
-        xy=(r_m - L*cos(alpha), z_m + L*sin(alpha)), xytext=(r_m, z_m).
-      - Tension T (cuerda hacia el vertice): A LO LARGO de la pared, HACIA EL VERTICE (0,0).
-        Direccion: (-sin(alpha), -cos(alpha)). Color VERDE.
-        xy=(r_m - L*sin(alpha), z_m - L*cos(alpha)), xytext=(r_m, z_m).
+      - Normal N: PERPENDICULAR a la pared conica. Color AZUL.
+        * Si el objeto esta en la superficie INTERIOR del cono:
+          N apunta hacia el eje (HACIA ADENTRO): direccion (-cos(alpha), sin(alpha)).
+          xy=(r_m - L*cos(alpha), z_m + L*sin(alpha)), xytext=(r_m, z_m).
+        * Si el objeto esta en la superficie EXTERIOR del cono:
+          N apunta AFUERA del eje (HACIA AFUERA): direccion (cos(alpha), sin(alpha)).
+          xy=(r_m + L*cos(alpha), z_m + L*sin(alpha)), xytext=(r_m, z_m).
+      - Tension T (cuerda hacia el vertice): A LO LARGO de la pared, HACIA EL VERTICE.
+        Calcular la direccion como el vector unitario desde la masa hacia el vertice. Color VERDE.
       - L = 2.5 para todas las flechas (longitud visual uniforme).
 
       PESA COLGANTE (si existe):
@@ -1369,15 +1382,18 @@ REGLAS ESTRICTAS DE COMPORTAMIENTO:
 
       ESCALA DE FLECHAS Y LIMITES DE EJES - MUY IMPORTANTE:
       Los vectores v⃗ y a⃗ suelen ser muy chicos o muy grandes comparados con la posicion.
-      SIEMPRE escala las flechas para que midan aproximadamente 0.7 unidades en el grafico:
-        escala_v = 0.7 / mag_v if mag_v != 0 else 0
-        escala_a = 0.7 / mag_a if mag_a != 0 else 0
-      Los versores deben medir 0.5 unidades (escala fija = 0.5).
+      La escala debe ser PROPORCIONAL al tamaño del problema (la magnitud de r⃗):
+        mag_r = np.linalg.norm(r_vec)
+        tamano_flecha = max(mag_r * 0.25, 0.5)
+        escala_v = tamano_flecha / mag_v if mag_v != 0 else 0
+        escala_a = tamano_flecha / mag_a if mag_a != 0 else 0
+        escala_versor = tamano_flecha * 0.7
+      Asi los vectores siempre miden ~25% del vector posicion, visibles en cualquier escala.
       DESPUES de calcular todas las posiciones de las puntas de vectores, ajustar los limites
       de los ejes para que TODOS los vectores queden DENTRO del grafico con margen:
         todas_x = [0, x_part, punta_v_x, punta_a_x, punta_versor1_x, punta_versor2_x]
         todas_y = [0, y_part, punta_v_y, punta_a_y, punta_versor1_y, punta_versor2_y]
-        margen = 0.5
+        margen = tamano_flecha
         ax.set_xlim(min(todas_x) - margen, max(todas_x) + margen)
         ax.set_ylim(min(todas_y) - margen, max(todas_y) + margen)
       Agrega una nota: ax.text(..., "Vectores escalados", fontsize=9, color='gray')

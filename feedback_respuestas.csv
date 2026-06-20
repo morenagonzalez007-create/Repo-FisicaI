@@ -12,3 +12,8 @@ disparar un dardo de espuma. Cuando se coloca el dardo en la rec´amara el resor
 y plantee la segunda ley de Newton."
 2026-06-20 12:00:36,incorrecta,"Dos masas están conectadas por una cuerda que pasa por una polea sin fricción. La masa m₁ = 2 kg cuelga como un péndulo de longitud L = 1.5 m desplazado θ = 45° de la vertical, y la masa m₂ = 3 kg está sobre una mesa horizontal sin fricción. Si el sistema parte del reposo, hallar la aceleración de ambas masas y la tensión de la cuerda en el instante inicial."
 2026-06-20 12:07:46,correcta,"Dos masas están conectadas por una cuerda que pasa por una polea sin fricción. La masa m₁ = 2 kg cuelga como un péndulo de longitud L = 1.5 m desplazado θ = 45° de la vertical, y la masa m₂ = 3 kg está sobre una mesa horizontal sin fricción. Si el sistema parte del reposo, hallar la aceleración de ambas masas y la tensión de la cuerda en el instante inicial."
+2026-06-20 14:15:22,incorrecta,"Ejercicio 1:
+Un auto de juguete, de 0.5 kg de masa, está apoyado sobre una superficie cónica (radio máximo 20 cm y θ = 30°) y unido a una pesa mediante una cuerda inextensible de masa despreciable, como se muestra en la figura. Determinar el valor de la masa de la pesa de manera que el auto gire alrededor del cono con rapidez constante. Desprecie el rozamiento entre el auto y la superficie. Si la cuerda se rompe, ¿cuánto tarda el auto en llegar al suelo? La altura de la mesa es de 1 m."
+2026-06-20 14:27:46,incorrecta,volve a hacer como se ve el diagrama
+2026-06-20 14:58:14,correcta,grafica los vectores y versores solo en coordenadas polares
+2026-06-20 15:10:34,incompleta,hace el DCL
