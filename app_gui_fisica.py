@@ -1625,12 +1625,23 @@ class AppFisica(ctk.CTk):
         )
         self.boton_vectores.grid(row=8, column=0, padx=16, pady=(0, 10), sticky="ew")
 
+        frame_extra = ctk.CTkFrame(left, fg_color="transparent")
+        frame_extra.grid(row=9, column=0, padx=16, pady=(0, 16), sticky="ew")
+        frame_extra.grid_columnconfigure((0, 1), weight=1)
+
         self.boton_navegador = ctk.CTkButton(
-            left, text="Ver formulas en navegador",
+            frame_extra, text="Ver formulas",
             command=self._abrir_en_navegador,
             fg_color="#2d6a4f", hover_color="#40916c",
         )
-        self.boton_navegador.grid(row=9, column=0, padx=16, pady=(0, 16), sticky="ew")
+        self.boton_navegador.grid(row=0, column=0, padx=(0, 6), pady=0, sticky="ew")
+
+        self.boton_torta = ctk.CTkButton(
+            frame_extra, text="Estadisticas (torta)",
+            command=self.graficar_torta,
+            fg_color="#117864", hover_color="#0e6655",
+        )
+        self.boton_torta.grid(row=0, column=1, padx=(6, 0), pady=0, sticky="ew")
 
         # Panel derecho
         right = ctk.CTkFrame(main, corner_radius=16)
@@ -1786,6 +1797,7 @@ class AppFisica(ctk.CTk):
         self.boton_limpiar.configure(state=estado)
         self.boton_navegador.configure(state=estado)
         self.boton_adjuntar.configure(state=estado)
+        self.boton_torta.configure(state=estado)
 
     def _adjuntar_imagen(self):
         ruta = filedialog.askopenfilename(
@@ -2192,6 +2204,72 @@ class AppFisica(ctk.CTk):
             messagebox.showinfo("Sin respuesta", "No hay respuesta para mostrar en el navegador.")
             return
         abrir_en_navegador(self._last_response)
+
+    def graficar_torta(self):
+        """Lee feedback_respuestas.csv y muestra un grafico de torta con los porcentajes."""
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        archivo = os.path.join(base_dir, "feedback_respuestas.csv")
+
+        if not os.path.exists(archivo):
+            messagebox.showinfo(
+                "Sin datos",
+                "Todavia no hay feedback registrado.\n"
+                "Vota algunas respuestas y volve a intentar."
+            )
+            return
+
+        # Contar las valoraciones del CSV
+        conteo = {"correcta": 0, "incompleta": 0, "incorrecta": 0}
+        try:
+            with open(archivo, "r", newline="", encoding="utf-8") as f:
+                for fila in csv.DictReader(f):
+                    val = (fila.get("valoracion") or "").strip().lower()
+                    if val in conteo:
+                        conteo[val] += 1
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo leer el CSV:\n{e}")
+            return
+
+        total = sum(conteo.values())
+        if total == 0:
+            messagebox.showinfo("Sin datos", "El archivo de feedback esta vacio.")
+            return
+
+        # Armar listas solo con las categorias que tienen al menos 1 voto
+        etiquetas_base = {
+            "correcta": ("Correctas", "#2d6a4f"),
+            "incompleta": ("Incompletas", "#d97706"),
+            "incorrecta": ("Incorrectas", "#991b1b"),
+        }
+        labels, valores, colores = [], [], []
+        for clave, (nombre, color) in etiquetas_base.items():
+            if conteo[clave] > 0:
+                labels.append(f"{nombre} ({conteo[clave]})")
+                valores.append(conteo[clave])
+                colores.append(color)
+
+        # Generar el codigo del grafico y ejecutarlo en un proceso aparte
+        codigo = f"""# GRAFICO_TORTA
+import matplotlib.pyplot as plt
+
+labels = {labels}
+valores = {valores}
+colores = {colores}
+
+fig, ax = plt.subplots(figsize=(7, 7))
+ax.pie(valores, labels=labels, colors=colores, autopct='%1.1f%%',
+       startangle=90, textprops=dict(color='black', fontsize=12))
+ax.set_title('Feedback de respuestas (Total: {total})', fontsize=15, fontweight='bold')
+ax.axis('equal')
+plt.tight_layout()
+plt.show()
+"""
+
+        threading.Thread(
+            target=self._ejecutar_bloques,
+            args=([codigo], "grafico de torta"),
+            daemon=True,
+        ).start()
 
 
 if __name__ == "__main__":
